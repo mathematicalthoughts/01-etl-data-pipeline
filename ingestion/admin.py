@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import DataSource, IngestionRun
+from .models import DataSource, IngestionRun, PriceRecord
 
 
 @admin.register(DataSource)
@@ -16,3 +16,11 @@ class IngestionRunAdmin(admin.ModelAdmin):
     list_filter = ("status", "source")
     date_hierarchy = "created_at"
     readonly_fields = ("created_at",)
+
+
+@admin.register(PriceRecord)
+class PriceRecordAdmin(admin.ModelAdmin):
+    list_display = ("ticker", "date", "close", "volume", "source")
+    list_filter = ("source", "ticker")
+    date_hierarchy = "date"
+    search_fields = ("ticker",)

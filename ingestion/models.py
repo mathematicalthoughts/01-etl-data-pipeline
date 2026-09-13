@@ -47,3 +47,65 @@ class IngestionRun(models.Model):
 
     def __str__(self):
         return f"{self.source.name} — {self.status} ({self.created_at:%Y-%m-%d %H:%M})"
+
+    def quality_report(self):
+        """
+        Resumen de completitud del run: qué tickers efectivamente quedaron con
+        datos vs. cuáles fallaron, y una tasa de éxito sobre los intentados.
+        """
+        tickers_ingested = list(
+            self.price_records.order_by("ticker")
+            .values_list("ticker", flat=True)
+            .distinct()
+        )
+        tickers_failed = sorted(
+            {err.get("ticker") for err in (self.errors_json or []) if err.get("ticker")}
+        )
+        attempted = set(tickers_ingested) | set(tickers_failed)
+        success_rate = (
+            round(len(tickers_ingested) / len(attempted) * 100, 2) if attempted else 100.0
+        )
+
+        return {
+            "run_id": self.id,
+            "source": self.source.name,
+            "status": self.status,
+            "rows_ingested": self.rows_ingested,
+            "errors_json": self.errors_json,
+            "tickers_ingested": tickers_ingested,
+            "tickers_failed": tickers_failed,
+            "success_rate": success_rate,
+        }
+
+
+class PriceRecord(models.Model):
+    source = models.ForeignKey(
+        DataSource, on_delete=models.CASCADE, related_name="price_records"
+    )
+    ingestion_run = models.ForeignKey(
+        IngestionRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="price_records",
+    )
+    ticker = models.CharField(max_length=20)
+    date = models.DateField()
+    open = models.FloatField()
+    high = models.FloatField()
+    low = models.FloatField()
+    close = models.FloatField()
+    volume = models.BigIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["ticker", "date"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "ticker", "date"],
+                name="unique_price_record_per_source_ticker_date",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.ticker} {self.date} ({self.source.name})"

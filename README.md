@@ -32,6 +32,12 @@ python manage.py runserver
 pytest --cov
 ```
 
+> **Nota Neon:** el endpoint `-pooler` de Neon puede dejar una conexión colgada que
+> bloquea el `DROP DATABASE` de la base de test al finalizar la corrida. Por eso
+> `pytest.ini` fija `--reuse-db` por default (reusa la DB de test entre corridas
+> en vez de recrearla). Si cambiaste modelos/migraciones, corre
+> `pytest --create-db` una vez para forzar la recreación del esquema de test.
+
 ## Roadmap futuro
 - [ ] Agregar fuente de datos de commodities (cobre) relevante para minería
 - [ ] Dashboard de calidad de datos con series históricas de completitud
