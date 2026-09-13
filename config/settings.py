@@ -80,12 +80,14 @@ WSGI_APPLICATION = "config.wsgi.application"
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 # DATABASE_URL siempre viene de una variable de entorno, nunca hardcodeada
 # (ver ../CLAUDE.md). Neon Postgres en todos los entornos, incluyendo dev local.
+# DATABASE_SSL_REQUIRE se desactiva solo en CI, donde el servicio de Postgres
+# de GitHub Actions no expone SSL (Neon en dev/prod sí lo exige siempre).
 
 DATABASES = {
     "default": dj_database_url.parse(
         config("DATABASE_URL"),
         conn_max_age=600,
-        ssl_require=True,
+        ssl_require=config("DATABASE_SSL_REQUIRE", default=True, cast=bool),
     )
 }
 
