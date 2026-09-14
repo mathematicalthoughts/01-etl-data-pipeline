@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}{{ source.name }} · ETL Pipeline{% endblock %}
+
+{% block content %}
+<div class="crumb"><a href="{% url 'sources_list' %}">Fuentes de datos</a> / <span class="cur">{{ source.name }}</span></div>
+
+<div class="header">
+  <div class="h-left">
+    <div class="h-title">{{ source.name }}</div>
+    <div class="tag">{{ source.type }}</div>
+    {% if source.active %}
+      <span class="badge b-success"><span class="b-dot"></span>ACTIVA</span>
+    {% else %}
+      <span class="badge b-idle"><span class="b-dot"></span>INACTIVA</span>
+    {% endif %}
+  </div>
+  <button class="btn-primary"{% if not source.active %} style="opacity:0.35;"{% endif %}>Ejecutar ahora</button>
+</div>
+
+<div class="panel">
+  <div class="panel-title">Configuración (config_json)</div>
+  <div class="config-row">
+    <div class="config-item">
+      <div class="config-label">Tickers</div>
+      <div class="pills">
+        {% for ticker in source.config_json.tickers %}
+          <span class="pill">{{ ticker }}</span>
+        {% empty %}
+          <span class="config-value">—</span>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="config-item">
+      <div class="config-label">Period</div>
+      <div class="config-value">{{ source.config_json.period|default:"—" }}</div>
+    </div>
+    <div class="config-item">
+      <div class="config-label">Creada</div>
+      <div class="config-value">{{ source.created_at|date:"Y-m-d" }}</div>
+    </div>
+  </div>
+</div>
+
+<div class="panel grow">
+  <div class="panel-head">Historial de corridas — esta fuente</div>
+  <div class="panel-body">
+    <table>
+      <tr><th>Run</th><th>Estado</th><th>Filas</th><th>Inicio</th><th>Duración</th></tr>
+      {% for run in runs %}
+      <tr>
+        <td class="mono"><a href="{% url 'run_detail' run.pk %}">#{{ run.pk }}</a></td>
+        <td>{% include "partials/_status_badge.html" with status=run.status %}</td>
+        <td class="mono">{{ run.rows_ingested }}</td>
+        <td>hace {{ run.created_at|timesince }}</td>
+        <td class="mono">
+          {% if run.duration_seconds != None %}{{ run.duration_seconds|floatformat:1 }}s{% else %}—{% endif %}
+        </td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="5">Todavía no hay corridas para esta fuente.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+{% endblock %}

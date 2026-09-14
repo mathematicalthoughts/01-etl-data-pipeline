@@ -96,3 +96,23 @@ def test_sources_list_shows_active_and_inactive_sources(client, stock_source, in
     assert "watchlist-mineria" in content
     assert "watchlist-tech" in content
     assert "FCX" in content
+
+
+# --- source detail ---------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_source_detail_returns_200_and_shows_config(client, stock_source, partial_run):
+    response = client.get(reverse("source_detail", args=[stock_source.pk]))
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert "config_json" in content
+    assert "FCX" in content
+    assert f"#{partial_run.pk}" in content
+
+
+@pytest.mark.django_db
+def test_source_detail_404_for_missing_source(client):
+    response = client.get(reverse("source_detail", args=[999]))
+    assert response.status_code == 404
