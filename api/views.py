@@ -1,3 +1,5 @@
+from django.http import JsonResponse
+from django.views.decorators.http import require_GET
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -12,6 +14,16 @@ from .serializers import (
     QualityReportSerializer,
     TriggerSourceSerializer,
 )
+
+
+@require_GET
+def healthz(request):
+    """
+    Healthcheck plano: sin auth, sin acceso a base de datos. Vista Django
+    simple (no DRF) a propósito, para no depender de authentication/
+    permission classes ni de nada que pueda fallar si la DB está caída.
+    """
+    return JsonResponse({"status": "ok"})
 
 
 class DataSourceViewSet(viewsets.ReadOnlyModelViewSet):

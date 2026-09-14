@@ -41,6 +41,21 @@ def stock_source(db):
     )
 
 
+# --- GET /healthz/ --------------------------------------------------------
+
+
+def test_healthz_returns_ok_without_auth_or_db_access(api_client):
+    """
+    Sin @pytest.mark.django_db a propósito: si la vista intentara tocar la
+    base de datos, pytest-django lo bloquearía con un RuntimeError y este
+    test fallaría.
+    """
+    response = api_client.get("/healthz/")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json() == {"status": "ok"}
+
+
 # --- GET /api/runs/ ----------------------------------------------------
 
 
