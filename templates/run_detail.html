@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Run #{{ run.pk }} · ETL Pipeline{% endblock %}
+
+{% block content %}
+<div class="crumb"><a href="{% url 'runs_list' %}">Corridas de ingesta</a> / <span class="cur">Run #{{ run.pk }}</span></div>
+
+<div class="header">
+  <div class="h-left">
+    <div class="h-title">Run #{{ run.pk }}</div>
+    <div class="h-sub"><a href="{% url 'source_detail' run.source.pk %}">{{ run.source.name }}</a></div>
+    {% include "partials/_status_badge.html" with status=run.status %}
+  </div>
+  <div class="h-sub">
+    hace {{ run.created_at|timesince }}{% if run.duration_seconds != None %} · duración {{ run.duration_seconds|floatformat:1 }}s{% endif %}
+  </div>
+</div>
+
+<div class="kpi-row compact">
+  <div class="kpi">
+    <div class="kpi-label">Tasa de éxito</div>
+    <div class="kpi-value {{ rate_class }}">{{ report.success_rate }}%</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Filas ingeridas</div>
+    <div class="kpi-value">{{ run.rows_ingested }}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Tickers OK</div>
+    <div class="kpi-value">{{ report.tickers_ingested|length }} de {{ tickers_total_count }}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Duración</div>
+    <div class="kpi-value">
+      {% if run.duration_seconds != None %}{{ run.duration_seconds|floatformat:1 }}s{% else %}—{% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="body-grid">
+  <div class="panel grow">
+    <div class="panel-head">Detalle por ticker</div>
+    <div class="panel-body">
+      {% for row in ticker_rows %}
+      <div class="ticker-row">
+        <div class="t-icon {% if row.ok %}ok{% else %}fail{% endif %}">
+          {% if row.ok %}
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6"></path></svg>
+          {% else %}
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+          {% endif %}
+        </div>
+        <div class="t-name">{{ row.ticker }}</div>
+        <div class="t-msg{% if not row.ok %} err{% endif %}">
+          {% if row.ok %}{{ row.rows }} fila{{ row.rows|pluralize }} ingerida{{ row.rows|pluralize }}{% else %}{{ row.error }}{% endif %}
+        </div>
+      </div>
+      {% empty %}
+      <div class="ticker-row"><div class="t-msg">Sin tickers registrados para este run.</div></div>
+      {% endfor %}
+    </div>
+    {% if errors_display %}
+    <div class="errors-title">Errores (errors_json)</div>
+    {% for err in errors_display %}
+    <div class="error-item">{{ err }}</div>
+    {% endfor %}
+    {% endif %}
+  </div>
+
+  <div class="panel grow">
+    <div class="panel-head">Resumen generado por IA</div>
+    <div class="ai-panel-body">
+      <div class="ai-label">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.7L19 10l-5.1 1.3L12 17l-1.9-5.7L5 10l5.1-1.3z"></path></svg>
+        Gemini{% if gemini_model %} · {{ gemini_model }}{% endif %}
+      </div>
+      {% if run.summary %}
+      <div class="ai-text">&ldquo;{{ run.summary }}&rdquo;</div>
+      <div class="ai-meta">generado al finalizar el run · run.summary</div>
+      {% else %}
+      <div class="ai-text">Todavía no hay resumen generado para este run.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

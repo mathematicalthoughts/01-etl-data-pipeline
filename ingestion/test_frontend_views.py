@@ -148,3 +148,24 @@ def test_runs_list_filters_by_status(client, stock_source, partial_run):
 
     assert f"#{success_run.pk}" in content
     assert f"#{partial_run.pk}" not in content
+
+
+# --- run detail --------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_run_detail_returns_200_with_ticker_breakdown(client, partial_run):
+    response = client.get(reverse("run_detail", args=[partial_run.pk]))
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert "FCX" in content
+    assert "SCCO" in content
+    assert "symbol not found" in content
+    assert "falló por símbolo no encontrado" in content  # run.summary
+
+
+@pytest.mark.django_db
+def test_run_detail_404_for_missing_run(client):
+    response = client.get(reverse("run_detail", args=[999]))
+    assert response.status_code == 404
