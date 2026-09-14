@@ -18,6 +18,16 @@ def stock_source(db):
 
 
 @pytest.fixture
+def inactive_source(db):
+    return DataSource.objects.create(
+        name="watchlist-tech",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": ["AAPL"]},
+        active=False,
+    )
+
+
+@pytest.fixture
 def partial_run(stock_source):
     run = IngestionRun.objects.create(
         source=stock_source,
@@ -66,3 +76,23 @@ def test_dashboard_shows_source_and_recent_run(client, stock_source, partial_run
 def test_dashboard_shows_latest_gemini_summary(client, partial_run):
     response = client.get(reverse("dashboard"))
     assert "falló por símbolo no encontrado" in response.content.decode()
+
+
+# --- sources list --------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_sources_list_returns_200_with_no_data(client):
+    response = client.get(reverse("sources_list"))
+    assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_sources_list_shows_active_and_inactive_sources(client, stock_source, inactive_source):
+    response = client.get(reverse("sources_list"))
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert "watchlist-mineria" in content
+    assert "watchlist-tech" in content
+    assert "FCX" in content

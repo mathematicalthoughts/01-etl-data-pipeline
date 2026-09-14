@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Fuentes de datos · ETL Pipeline{% endblock %}
+
+{% block content %}
+<div class="header">
+  <div>
+    <div class="h-title">Fuentes de datos</div>
+    <div class="h-sub">
+      {{ rows|length }} configurada{{ rows|length|pluralize }} · alta y edición desde /admin — acá se dispara la ejecución
+    </div>
+  </div>
+</div>
+
+<div class="panel grow">
+  <div class="panel-body">
+    <table>
+      <tr><th>Nombre</th><th>Tipo</th><th>Tickers</th><th>Activa</th><th>Último estado</th><th></th></tr>
+      {% for row in rows %}
+      <tr>
+        <td class="name mono"{% if not row.source.active %} style="color:var(--text-dim);"{% endif %}>
+          <a href="{% url 'source_detail' row.source.pk %}">{{ row.source.name }}</a>
+        </td>
+        <td class="tag">{{ row.source.type }}</td>
+        <td>
+          <div class="pills">
+            {% for ticker in row.source.config_json.tickers %}<span class="pill">{{ ticker }}</span>{% endfor %}
+          </div>
+        </td>
+        <td>
+          {% if row.source.active %}
+            <span class="active-flag on"><span class="dot"></span>sí</span>
+          {% else %}
+            <span class="active-flag off"><span class="dot"></span>no</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.last_run %}
+            {% include "partials/_status_badge.html" with status=row.last_run.status %}
+          {% else %}
+            <span class="badge b-idle"><span class="b-dot"></span>SIN CORRIDAS</span>
+          {% endif %}
+        </td>
+        <td>
+          <button class="btn"{% if not row.source.active %} style="opacity:0.35;"{% endif %}>Ejecutar ahora</button>
+        </td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="6">Todavía no hay fuentes configuradas.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+{% endblock %}
