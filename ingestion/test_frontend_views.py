@@ -116,3 +116,35 @@ def test_source_detail_returns_200_and_shows_config(client, stock_source, partia
 def test_source_detail_404_for_missing_source(client):
     response = client.get(reverse("source_detail", args=[999]))
     assert response.status_code == 404
+
+
+# --- runs list -------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_runs_list_returns_200_with_no_data(client):
+    response = client.get(reverse("runs_list"))
+    assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_runs_list_shows_run_and_first_error(client, partial_run):
+    response = client.get(reverse("runs_list"))
+
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert f"#{partial_run.pk}" in content
+    assert "SCCO: symbol not found" in content
+
+
+@pytest.mark.django_db
+def test_runs_list_filters_by_status(client, stock_source, partial_run):
+    success_run = IngestionRun.objects.create(
+        source=stock_source, status=IngestionRun.Status.SUCCESS, rows_ingested=5
+    )
+
+    response = client.get(reverse("runs_list"), {"status": "success"})
+    content = response.content.decode()
+
+    assert f"#{success_run.pk}" in content
+    assert f"#{partial_run.pk}" not in content
