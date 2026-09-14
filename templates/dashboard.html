@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard · ETL Pipeline{% endblock %}
+
+{% block content %}
+<div class="header">
+  <div>
+    <div class="h-title">Dashboard</div>
+    <div class="h-sub">Resumen de calidad de datos — todas las fuentes</div>
+  </div>
+  <div class="h-env">production</div>
+</div>
+
+<div class="kpi-row">
+  <div class="kpi">
+    <div class="kpi-label">Fuentes activas</div>
+    <div class="kpi-value">{{ active_sources_count }}</div>
+    <div class="kpi-caption">de {{ total_sources_count }} configurada{{ total_sources_count|pluralize }}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Éxito global (30d)</div>
+    <div class="kpi-value{% if success_rate_30d != None %} ok{% endif %}">
+      {% if success_rate_30d != None %}{{ success_rate_30d }}%{% else %}—{% endif %}
+    </div>
+    <div class="kpi-caption">corridas de los últimos 30 días</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Corridas hoy</div>
+    <div class="kpi-value">{{ runs_today }}</div>
+    <div class="kpi-caption">
+      {% if recent_runs %}última hace {{ recent_runs.0.created_at|timesince }}{% else %}sin corridas aún{% endif %}
+    </div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Filas ingeridas (30d)</div>
+    <div class="kpi-value">{{ rows_30d }}</div>
+    <div class="kpi-caption">registros OHLCV</div>
+  </div>
+</div>
+
+<div class="body-grid">
+  <div class="panel grow">
+    <div class="panel-head">Estado por fuente</div>
+    <div class="panel-body">
+      <table>
+        <tr><th>Fuente</th><th>Tipo</th><th>Último estado</th><th>Última corrida</th><th>Éxito</th></tr>
+        {% for row in source_rows %}
+        <tr>
+          <td class="name"{% if not row.source.active %} style="color:var(--text-dim);"{% endif %}>
+            <a href="{% url 'source_detail' row.source.pk %}">{{ row.source.name }}</a>
+          </td>
+          <td class="tag">{{ row.source.type }}</td>
+          <td>
+            {% if row.last_run %}
+              {% include "partials/_status_badge.html" with status=row.last_run.status %}
+            {% else %}
+              <span class="badge b-idle"><span class="b-dot"></span>SIN CORRIDAS</span>
+            {% endif %}
+          </td>
+          <td>{% if row.last_run %}hace {{ row.last_run.created_at|timesince }}{% else %}—{% endif %}</td>
+          <td class="mono">{% if row.success_rate != None %}{{ row.success_rate }}%{% else %}—{% endif %}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5">Todavía no hay fuentes configuradas.</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+
+  <div class="panel grow">
+    <div class="panel-head">Corridas recientes</div>
+    <div class="panel-body">
+      <div class="feed">
+        {% for run in recent_runs %}
+        <div class="feed-item">
+          <div class="feed-top">
+            <span class="feed-src">{{ run.source.name }}</span>
+            <span class="feed-time">hace {{ run.created_at|timesince }}</span>
+          </div>
+          <div class="feed-meta">
+            {% include "partials/_status_badge.html" with status=run.status %} · {{ run.rows_ingested }} filas
+          </div>
+        </div>
+        {% empty %}
+        <div class="feed-item"><div class="feed-meta">Todavía no hay corridas registradas.</div></div>
+        {% endfor %}
+      </div>
+      {% if latest_summary_run %}
+      <div class="ai-block">
+        <div class="ai-label">Gemini · resumen del último run</div>
+        <div class="ai-text">&ldquo;{{ latest_summary_run.summary }}&rdquo;</div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}
