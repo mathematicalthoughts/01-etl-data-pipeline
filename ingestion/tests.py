@@ -1,3 +1,4 @@
+import logging
 from datetime import date
 from unittest.mock import MagicMock, patch
 
@@ -7,8 +8,10 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from ingestion.models import DataSource, IngestionRun, PriceRecord
+from ingestion.services import generate_run_summary, run_ingestion
 
 PATCH_TARGET = "ingestion.services.yf.Ticker"
+GEMINI_PATCH_TARGET = "ingestion.services.genai.Client"
 
 
 def make_history_df(rows):
@@ -42,6 +45,14 @@ def mock_ticker_returning(history_by_ticker):
         return mock_instance
 
     return _factory
+
+
+def make_fake_gemini_client(response_text="Resumen generado por Gemini."):
+    fake_response = MagicMock()
+    fake_response.text = response_text
+    fake_client = MagicMock()
+    fake_client.models.generate_content.return_value = fake_response
+    return fake_client
 
 
 @pytest.fixture
@@ -234,4 +245,118 @@ def test_ingest_source_never_calls_real_yfinance_network(stock_source):
     )
     with patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": history})) as mocked:
         call_command("ingest_source", "watchlist-mineria")
+        assert mocked.called
+
+
+# --- generate_run_summary / integración con Gemini ------------------------
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_saves_text_from_gemini(stock_source):
+    run = IngestionRun.objects.create(
+        source=stock_source, status=IngestionRun.Status.SUCCESS, rows_ingested=1
+    )
+    PriceRecord.objects.create(
+        source=stock_source,
+        ingestion_run=run,
+        ticker="AAPL",
+        date=date(2026, 1, 2),
+        open=10,
+        high=12,
+        low=9,
+        close=11,
+        volume=1000,
+    )
+    fake_client = make_fake_gemini_client(
+        "AAPL se ingirió con éxito y sin fallos, tasa de éxito del 100%."
+    )
+
+    with patch(GEMINI_PATCH_TARGET, return_value=fake_client) as mocked_cls:
+        summary = generate_run_summary(run)
+
+    assert summary == "AAPL se ingirió con éxito y sin fallos, tasa de éxito del 100%."
+    run.refresh_from_db()
+    assert run.summary == "AAPL se ingirió con éxito y sin fallos, tasa de éxito del 100%."
+    mocked_cls.assert_called_once()
+    fake_client.models.generate_content.assert_called_once()
+
+    _, kwargs = fake_client.models.generate_content.call_args
+    assert "AAPL" in kwargs["contents"]
+    assert run.status in kwargs["contents"]
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_strips_whitespace_only_text(stock_source):
+    run = IngestionRun.objects.create(source=stock_source, status=IngestionRun.Status.SUCCESS)
+    fake_client = make_fake_gemini_client("   \n  ")
+
+    with patch(GEMINI_PATCH_TARGET, return_value=fake_client):
+        summary = generate_run_summary(run)
+
+    assert summary == ""
+    run.refresh_from_db()
+    assert run.summary == ""
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_handles_none_text(stock_source):
+    run = IngestionRun.objects.create(source=stock_source, status=IngestionRun.Status.SUCCESS)
+    fake_client = make_fake_gemini_client(None)
+
+    with patch(GEMINI_PATCH_TARGET, return_value=fake_client):
+        summary = generate_run_summary(run)
+
+    assert summary == ""
+    run.refresh_from_db()
+    assert run.summary == ""
+
+
+@pytest.mark.django_db
+def test_run_ingestion_sets_summary_from_gemini_at_the_end(stock_source):
+    history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 11, "volume": 1000}]
+    )
+    fake_client = make_fake_gemini_client("Se ingirió AAPL sin errores, tasa de éxito del 100%.")
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        run = run_ingestion(stock_source)
+
+    assert run.summary == "Se ingirió AAPL sin errores, tasa de éxito del 100%."
+
+
+@pytest.mark.django_db
+def test_run_ingestion_survives_gemini_failure_and_logs_it(stock_source, caplog):
+    history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 11, "volume": 1000}]
+    )
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": history})),
+        patch(GEMINI_PATCH_TARGET, side_effect=Exception("Gemini rate limit")),
+        caplog.at_level(logging.ERROR),
+    ):
+        run = run_ingestion(stock_source)
+
+    assert run.status == IngestionRun.Status.SUCCESS
+    assert run.rows_ingested == 1
+    assert run.summary == ""
+    assert "resumen de Gemini" in caplog.text
+    assert str(run.id) in caplog.text
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_never_calls_real_gemini_network(stock_source):
+    """
+    Documenta la garantía: generate_run_summary siempre pasa por un cliente
+    mockeado en tests (acá explícito; en el resto de la suite, por el
+    autouse fixture en conftest.py), nunca golpea la API real de Gemini.
+    """
+    run = IngestionRun.objects.create(source=stock_source, status=IngestionRun.Status.SUCCESS)
+    fake_client = make_fake_gemini_client("ok")
+
+    with patch(GEMINI_PATCH_TARGET, return_value=fake_client) as mocked:
+        generate_run_summary(run)
         assert mocked.called

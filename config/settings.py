@@ -92,6 +92,14 @@ DATABASES = {
 }
 
 
+# Gemini API (resumen en lenguaje natural de cada IngestionRun)
+
+GEMINI_API_KEY = config("GEMINI_API_KEY", default="")
+# gemini-2.0-flash se retiró el 2026-06-01; gemini-3.8-flash es el modelo
+# estable más reciente sin fecha de retiro anunciada (2026-09-02).
+GEMINI_MODEL = config("GEMINI_MODEL", default="gemini-3.8-flash")
+
+
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 

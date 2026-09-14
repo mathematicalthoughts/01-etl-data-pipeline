@@ -1,7 +1,13 @@
+import logging
+
 import yfinance as yf
+from django.conf import settings
 from django.utils import timezone
+from google import genai
 
 from .models import DataSource, IngestionRun, PriceRecord
+
+logger = logging.getLogger(__name__)
 
 
 class IngestionError(Exception):
@@ -88,4 +94,60 @@ def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun
         run.status = IngestionRun.Status.SUCCESS
 
     run.save()
+
+    try:
+        generate_run_summary(run)
+    except Exception:
+        logger.exception(
+            "No se pudo generar el resumen de Gemini para IngestionRun #%s", run.id
+        )
+
     return run
+
+
+def _build_summary_prompt(run: IngestionRun, report: dict) -> str:
+    tickers_ingested = ", ".join(report["tickers_ingested"]) or "ninguno"
+    tickers_failed = ", ".join(report["tickers_failed"]) or "ninguno"
+    errors = (
+        "; ".join(
+            f"{e.get('ticker', '?')}: {e.get('error', 'error desconocido')}"
+            for e in (run.errors_json or [])
+        )
+        or "sin errores"
+    )
+
+    return (
+        "Sos un analista de datos. Resumí en 2 o 3 líneas, en español y en "
+        "lenguaje natural, el resultado de esta corrida de ingesta de precios "
+        "de mercado para un reporte de calidad de datos. Mencioná cuántos "
+        "tickers se ingirieron, cuáles fallaron y por qué, y la tasa de éxito. "
+        "No repitas los datos en formato de lista, redactalo como prosa.\n\n"
+        f"- Fuente: {run.source.name}\n"
+        f"- Estado del run: {run.status}\n"
+        f"- Filas ingeridas: {run.rows_ingested}\n"
+        f"- Tickers ingeridos correctamente: {tickers_ingested}\n"
+        f"- Tickers que fallaron: {tickers_failed}\n"
+        f"- Detalle de errores: {errors}\n"
+        f"- Tasa de éxito: {report['success_rate']}%\n"
+    )
+
+
+def generate_run_summary(run: IngestionRun) -> str:
+    """
+    Genera (vía Gemini) y persiste en `run.summary` un resumen en lenguaje
+    natural de 2-3 líneas de un IngestionRun: tickers ingeridos, tickers
+    fallidos y por qué, y la tasa de éxito de `run.quality_report()`.
+    """
+    report = run.quality_report()
+    prompt = _build_summary_prompt(run, report)
+
+    client = genai.Client(api_key=settings.GEMINI_API_KEY)
+    response = client.models.generate_content(
+        model=settings.GEMINI_MODEL,
+        contents=prompt,
+    )
+
+    summary = (response.text or "").strip()
+    run.summary = summary
+    run.save(update_fields=["summary"])
+    return summary
