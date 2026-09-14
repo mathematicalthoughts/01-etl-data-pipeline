@@ -169,3 +169,72 @@ def test_run_detail_returns_200_with_ticker_breakdown(client, partial_run):
 def test_run_detail_404_for_missing_run(client):
     response = client.get(reverse("run_detail", args=[999]))
     assert response.status_code == 404
+
+
+# --- prices explorer -------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_prices_explorer_returns_200_with_no_data(client):
+    response = client.get(reverse("prices_explorer"))
+    assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_prices_explorer_groups_by_ticker(client, stock_source, partial_run):
+    PriceRecord.objects.create(
+        source=stock_source,
+        ingestion_run=partial_run,
+        ticker="FCX",
+        date=date(2026, 1, 3),
+        open=11,
+        high=13,
+        low=10,
+        close=12.5,
+        volume=2000,
+    )
+
+    response = client.get(reverse("prices_explorer"))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "FCX" in content
+    assert "2,000" in content  # volume_display con separador de miles
+
+
+@pytest.mark.django_db
+def test_prices_explorer_filters_by_ticker(client, stock_source):
+    PriceRecord.objects.create(
+        source=stock_source, ticker="FCX", date=date(2026, 1, 2),
+        open=1, high=1, low=1, close=1, volume=1,
+    )
+    PriceRecord.objects.create(
+        source=stock_source, ticker="SCCO", date=date(2026, 1, 2),
+        open=1, high=1, low=1, close=1, volume=1,
+    )
+
+    response = client.get(reverse("prices_explorer"), {"ticker": "FCX"})
+    content = response.content.decode()
+
+    # el <select> de filtro lista todos los tickers disponibles a propósito;
+    # lo que nos importa filtrar es qué grupo de precios se muestra.
+    assert '<span class="gh-ticker">FCX</span>' in content
+    assert '<span class="gh-ticker">SCCO</span>' not in content
+
+
+@pytest.mark.django_db
+def test_prices_explorer_filters_by_source(client, stock_source, inactive_source):
+    PriceRecord.objects.create(
+        source=stock_source, ticker="FCX", date=date(2026, 1, 2),
+        open=1, high=1, low=1, close=1, volume=1,
+    )
+    PriceRecord.objects.create(
+        source=inactive_source, ticker="AAPL", date=date(2026, 1, 2),
+        open=1, high=1, low=1, close=1, volume=1,
+    )
+
+    response = client.get(reverse("prices_explorer"), {"source": stock_source.pk})
+    content = response.content.decode()
+
+    assert '<span class="gh-ticker">FCX</span>' in content
+    assert '<span class="gh-ticker">AAPL</span>' not in content

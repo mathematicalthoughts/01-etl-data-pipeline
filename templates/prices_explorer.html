@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Explorador de precios · ETL Pipeline{% endblock %}
+
+{% block content %}
+<div class="header">
+  <div>
+    <div class="h-title">Explorador de precios</div>
+    <div class="h-sub">Datos OHLCV ingeridos · GET /api/prices/?ticker=&amp;source=</div>
+  </div>
+  <form method="get" class="filters">
+    <select name="ticker" class="select">
+      <option value="">ticker: todos</option>
+      {% for t in tickers %}
+      <option value="{{ t }}"{% if t == selected_ticker %} selected{% endif %}>{{ t }}</option>
+      {% endfor %}
+    </select>
+    <select name="source" class="select">
+      <option value="">fuente: todas</option>
+      {% for s in sources %}
+      <option value="{{ s.pk }}"{% if s.pk|stringformat:"s" == selected_source %} selected{% endif %}>{{ s.name }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn" type="submit">Filtrar</button>
+  </form>
+</div>
+
+<div class="body-scroll">
+  {% for group in ticker_groups %}
+  <div class="group">
+    <div class="group-head">
+      <div class="gh-left">
+        <span class="gh-ticker">{{ group.ticker }}</span>
+        <span class="gh-src">{{ group.source.name }}</span>
+      </div>
+      {% if group.sparkline_points %}
+      <svg width="90" height="24" viewBox="0 0 90 24">
+        <polyline points="{{ group.sparkline_points }}" fill="none" stroke="{% if group.trend_up %}oklch(74% 0.15 152){% else %}oklch(66% 0.19 25){% endif %}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></polyline>
+      </svg>
+      {% endif %}
+      <span class="gh-last">${{ group.last_close|floatformat:2 }}</span>
+    </div>
+    <table class="prices">
+      <tr><th>Fecha</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volumen</th></tr>
+      {% for record in group.records %}
+      <tr>
+        <td>{{ record.date|date:"Y-m-d" }}</td>
+        <td>{{ record.open|floatformat:2 }}</td>
+        <td>{{ record.high|floatformat:2 }}</td>
+        <td>{{ record.low|floatformat:2 }}</td>
+        <td>{{ record.close|floatformat:2 }}</td>
+        <td>{{ record.volume_display }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% empty %}
+  <div class="group">
+    <div class="group-head"><div class="gh-left">Todavía no hay precios ingeridos para este filtro.</div></div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}
