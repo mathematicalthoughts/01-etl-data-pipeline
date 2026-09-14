@@ -1,0 +1,8 @@
+{% comment %}Badge de estado reutilizable. Uso: {% include "partials/_status_badge.html" with status=run.status %}{% endcomment %}
+{% if status == "success" %}<span class="badge b-success"><span class="b-dot"></span>SUCCESS</span>
+{% elif status == "partial" %}<span class="badge b-warning"><span class="b-dot"></span>PARTIAL</span>
+{% elif status == "failed" %}<span class="badge b-danger"><span class="b-dot"></span>FAILED</span>
+{% elif status == "running" %}<span class="badge b-warning"><span class="b-dot"></span>RUNNING</span>
+{% elif status == "pending" %}<span class="badge b-idle"><span class="b-dot"></span>PENDING</span>
+{% else %}<span class="badge b-idle"><span class="b-dot"></span>{{ status|upper }}</span>
+{% endif %}

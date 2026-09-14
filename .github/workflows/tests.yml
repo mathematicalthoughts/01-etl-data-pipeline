@@ -52,5 +52,11 @@ jobs:
       - name: Check for missing migrations
         run: python manage.py makemigrations --check --dry-run
 
+      - name: Collect static files
+        # Necesario porque STORAGES["staticfiles"] usa el ManifestStaticFilesStorage
+        # de whitenoise: sin el manifest (generado acá), cualquier template que use
+        # {% static %} (todo el frontend server-rendered) rompe con ValueError.
+        run: python manage.py collectstatic --noinput
+
       - name: Run tests with coverage
         run: pytest --cov --cov-report=term-missing
