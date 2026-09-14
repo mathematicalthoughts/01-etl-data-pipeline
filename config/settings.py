@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import sys
 from pathlib import Path
 
 import dj_database_url
@@ -41,6 +42,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "django_celery_beat",
     "ingestion",
     "quality",
     "api",
@@ -98,6 +100,27 @@ GEMINI_API_KEY = config("GEMINI_API_KEY", default="")
 # gemini-2.0-flash se retiró el 2026-06-01; gemini-3.8-flash es el modelo
 # estable más reciente sin fecha de retiro anunciada (2026-09-02).
 GEMINI_MODEL = config("GEMINI_MODEL", default="gemini-3.8-flash")
+
+
+# Celery
+# https://docs.celeryq.dev/en/stable/userguide/configuration.html
+# REDIS_URL es la misma variable que usa el resto del proyecto para Redis
+# (ver ../CLAUDE.md); acá se reusa como broker y result backend de Celery.
+
+CELERY_BROKER_URL = config("REDIS_URL", default="redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = CELERY_BROKER_URL
+CELERY_TIMEZONE = "America/New_York"
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+# TESTING detecta si estamos corriendo bajo pytest (import de "pytest" en
+# sys.modules ocurre antes de que Django cargue settings vía pytest-django).
+# En DEBUG (dev local) y en tests, las tareas corren sincrónicamente
+# in-process: no hace falta un worker ni Redis real corriendo.
+TESTING = "pytest" in sys.modules
+CELERY_TASK_ALWAYS_EAGER = config(
+    "CELERY_TASK_ALWAYS_EAGER", default=DEBUG or TESTING, cast=bool
+)
+CELERY_TASK_EAGER_PROPAGATES = True
 
 
 # Password validation

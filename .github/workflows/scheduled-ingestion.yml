@@ -1,0 +1,48 @@
+name: Scheduled Ingestion
+
+# Trigger real de ingesta para este portafolio (costo cero): GitHub Actions
+# cron reemplaza a un worker de Celery Beat corriendo 24/7 (ver README,
+# sección "Scheduling: Celery Beat vs GitHub Actions").
+#
+# IMPORTANTE sobre el cron: el `schedule` de GitHub Actions siempre corre en
+# UTC fijo, nunca ajusta por horario de verano (DST). La intención es
+# aproximar las 9, 13 y 17hs America/New_York que usa el PeriodicTask de
+# Celery Beat (`python manage.py setup_schedule`).
+#   - En horario de verano en EE.UU. (EDT, UTC-4, aprox. marzo-noviembre):
+#     9/13/17hs ET = 13/17/21hs UTC → coincide exacto con el cron de abajo.
+#   - Fuera de horario de verano (EST, UTC-5, aprox. noviembre-marzo):
+#     13/17/21hs UTC = 8/12/16hs ET → corre ~1 hora ANTES de lo previsto.
+# Esto es aceptable como aproximación para un cron de portafolio; no es
+# apto para un caso donde el horario exacto de mercado importe (ver README).
+on:
+  schedule:
+    - cron: "0 13,17,21 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  run-ingestions:
+    runs-on: ubuntu-latest
+
+    env:
+      DEBUG: "False"
+      SECRET_KEY: ${{ secrets.SECRET_KEY }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run ingestions synchronously (no Celery worker needed)
+        run: python manage.py run_ingestions_now

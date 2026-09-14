@@ -27,6 +27,14 @@ python manage.py runserver
 - **Por qué Neon Postgres y no SQLite:** desde el día 1 el modelo de datos y las validaciones se prueban contra el motor real de producción.
 - **Por qué Celery + Redis y no solo cron:** permite reintentos con backoff y visibilidad de estado por corrida, no solo "corrió o no corrió".
 
+### Scheduling: Celery Beat vs GitHub Actions
+Este repo tiene **dos mecanismos de scheduling**, a propósito, para dos escenarios distintos:
+
+- **Celery + Redis + django-celery-beat** (`ingestion/tasks.py`, `python manage.py setup_schedule`) es la arquitectura pensada para **producción a escala**: un worker corriendo 24/7 consume la cola, django-celery-beat lee el `PeriodicTask` desde la base de datos (nada hardcodeado en código) y dispara `run_scheduled_ingestions.delay()` cada 4 horas en horario de mercado. Esto da reintentos, colas separadas, visibilidad de tareas en curso y la posibilidad de escalar workers horizontalmente.
+- **GitHub Actions** (`.github/workflows/scheduled-ingestion.yml` + `python manage.py run_ingestions_now`) es el **trigger real que efectivamente corre este portafolio**, porque un worker de Celery Beat corriendo 24/7 no entra en el free tier de Render (Render free tier apaga servicios sin tráfico HTTP; un worker en background 24/7 requiere un plan pago). `run_ingestions_now` llama la lógica de `run_scheduled_ingestions()` directamente en el mismo proceso —sin `.delay()`, sin broker, sin worker— así que el único costo es el minuto de ejecución del runner de Actions.
+- El cron de GitHub Actions (`schedule:`) corre siempre en **UTC fijo** y no ajusta por horario de verano; el comentario en el workflow documenta el desfase de ~1 hora que esto genera fuera de horario de verano en EE.UU.
+- Si en algún momento hay presupuesto para un worker 24/7 (Render pago, Fly.io, etc.), el camino de Celery Beat ya está armado y probado — solo hace falta desplegar el worker y dejar de correr el workflow de Actions.
+
 ## Tests
 ```bash
 pytest --cov
