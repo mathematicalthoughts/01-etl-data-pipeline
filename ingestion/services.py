@@ -1,5 +1,8 @@
 import logging
+import time
+from datetime import timedelta
 
+import requests
 import yfinance as yf
 from django.conf import settings
 from django.utils import timezone
@@ -22,6 +25,33 @@ INGESTABLE_SOURCE_TYPES = {
     DataSource.SourceType.STOCK_PRICE,
     DataSource.SourceType.COMMODITY,
 }
+
+# Reintentos solo para errores transitorios de red: timeout o conexión
+# rechazada/rota. Un símbolo inexistente o una respuesta vacía no son
+# transitorios -- reintentar eso es ruido, no se reintentan.
+TRANSIENT_NETWORK_ERRORS = (
+    requests.exceptions.RequestException,
+    ConnectionError,
+    TimeoutError,
+)
+MAX_HISTORY_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = (1, 2)
+
+
+def _fetch_ticker_history(ticker: str, period: str):
+    """
+    Llama a yf.Ticker(ticker).history(period=...) con hasta
+    MAX_HISTORY_ATTEMPTS intentos y backoff corto (1s, 2s) SOLO si la
+    excepción es un error transitorio de red. Cualquier otra excepción se
+    propaga de inmediato, sin reintentar.
+    """
+    for attempt in range(1, MAX_HISTORY_ATTEMPTS + 1):
+        try:
+            return yf.Ticker(ticker).history(period=period)
+        except TRANSIENT_NETWORK_ERRORS:
+            if attempt == MAX_HISTORY_ATTEMPTS:
+                raise
+            time.sleep(RETRY_BACKOFF_SECONDS[attempt - 1])
 
 
 def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun:
@@ -61,7 +91,7 @@ def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun
 
     for ticker in tickers:
         try:
-            history = yf.Ticker(ticker).history(period=resolved_period)
+            history = _fetch_ticker_history(ticker, resolved_period)
         except Exception as exc:
             errors.append({"ticker": ticker, "error": str(exc)})
             continue
@@ -114,6 +144,40 @@ def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun
         )
 
     return run
+
+
+def reap_stale_running_runs(stale_after_minutes: int = 15) -> int:
+    """
+    Marca como FAILED cualquier IngestionRun que quedó en RUNNING por más de
+    `stale_after_minutes` -- señal de que el proceso que lo estaba corriendo
+    murió a mitad de camino (crash, kill por timeout) y nunca llegó a
+    actualizar su propio estado. Pensado para llamarse al inicio de cada
+    corrida real (`run_ingestions_now`), antes de programar ingestas nuevas.
+
+    Devuelve la cantidad de runs marcados como FAILED.
+    """
+    cutoff = timezone.now() - timedelta(minutes=stale_after_minutes)
+    stale_runs = IngestionRun.objects.filter(
+        status=IngestionRun.Status.RUNNING, started_at__lt=cutoff
+    )
+
+    count = 0
+    for run in stale_runs:
+        run.status = IngestionRun.Status.FAILED
+        run.finished_at = timezone.now()
+        run.errors_json = [
+            {
+                "error": (
+                    f"Run marcado FAILED automáticamente: excedió "
+                    f"{stale_after_minutes}min en estado RUNNING, probable "
+                    f"crash del proceso anterior."
+                )
+            }
+        ]
+        run.save(update_fields=["status", "finished_at", "errors_json"])
+        count += 1
+
+    return count
 
 
 def _build_summary_prompt(run: IngestionRun, report: dict) -> str:

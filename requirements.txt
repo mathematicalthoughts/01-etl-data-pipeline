@@ -8,6 +8,7 @@ django-celery-beat>=2.7
 redis>=5.0
 pandas>=2.2
 yfinance>=0.2
+requests>=2.31
 google-genai>=0.3
 gunicorn>=22.0
 whitenoise>=6.7

@@ -45,4 +45,5 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run ingestions synchronously (no Celery worker needed)
+        timeout-minutes: 10
         run: python manage.py run_ingestions_now

@@ -1,14 +1,15 @@
 import logging
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.utils import timezone
 
 from ingestion.models import DataSource, IngestionRun, PriceRecord
-from ingestion.services import generate_run_summary, run_ingestion
+from ingestion.services import generate_run_summary, reap_stale_running_runs, run_ingestion
 
 PATCH_TARGET = "ingestion.services.yf.Ticker"
 GEMINI_PATCH_TARGET = "ingestion.services.genai.Client"
@@ -389,3 +390,126 @@ def test_generate_run_summary_never_calls_real_gemini_network(stock_source):
     with patch(GEMINI_PATCH_TARGET, return_value=fake_client) as mocked:
         generate_run_summary(run)
         assert mocked.called
+
+
+# --- retry con backoff en errores transitorios de red ----------------------
+
+
+@pytest.mark.django_db
+def test_ingest_source_retries_transient_network_error_then_succeeds(stock_source):
+    """
+    2 ConnectionError (transitorio) seguidos de un 3er intento exitoso: el
+    ticker debe terminar ingerido y debe haber exactamente 3 llamadas a
+    .history() -- 2 fallidas + la que finalmente trae datos.
+    """
+    history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 11, "volume": 1000}]
+    )
+    mock_ticker = MagicMock()
+    mock_ticker.history.side_effect = [
+        ConnectionError("connection refused"),
+        ConnectionError("connection refused"),
+        history,
+    ]
+
+    with (
+        patch(PATCH_TARGET, return_value=mock_ticker),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        call_command("ingest_source", "watchlist-mineria")
+
+    run = IngestionRun.objects.get(source=stock_source)
+    assert run.status == IngestionRun.Status.SUCCESS
+    assert run.rows_ingested == 1
+    assert run.errors_json == []
+    assert mock_ticker.history.call_count == 3
+    assert mocked_sleep.call_count == 2  # backoff entre intento 1->2 y 2->3
+    assert PriceRecord.objects.filter(source=stock_source, ticker="AAPL").count() == 1
+
+
+@pytest.mark.django_db
+def test_ingest_source_gives_up_after_exhausting_retries_on_persistent_transient_error(
+    stock_source,
+):
+    """
+    3 ConnectionError seguidos (se agotan los MAX_HISTORY_ATTEMPTS): el
+    ticker se registra como fallido en errors_json igual que cualquier otro
+    error, sin reintentos extra más allá del backoff ya agotado.
+    """
+    mock_ticker = MagicMock()
+    mock_ticker.history.side_effect = ConnectionError("connection refused")
+
+    with (
+        patch(PATCH_TARGET, return_value=mock_ticker),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        call_command("ingest_source", "watchlist-mineria")
+
+    run = IngestionRun.objects.get(source=stock_source)
+    assert run.status == IngestionRun.Status.FAILED
+    assert mock_ticker.history.call_count == 3
+    assert mocked_sleep.call_count == 2
+    assert run.errors_json[0]["ticker"] == "AAPL"
+    assert "connection refused" in run.errors_json[0]["error"]
+
+
+@pytest.mark.django_db
+def test_ingest_source_does_not_retry_non_transient_error(stock_source):
+    """
+    Un ValueError (ej. símbolo inexistente, no es un error de red) no debe
+    reintentarse: 1 sola llamada, y se registra en errors_json como hoy.
+    """
+    mock_ticker = MagicMock()
+    mock_ticker.history.side_effect = ValueError("símbolo inexistente")
+
+    with (
+        patch(PATCH_TARGET, return_value=mock_ticker),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        call_command("ingest_source", "watchlist-mineria")
+
+    run = IngestionRun.objects.get(source=stock_source)
+    assert run.status == IngestionRun.Status.FAILED
+    assert mock_ticker.history.call_count == 1
+    mocked_sleep.assert_not_called()
+    assert run.errors_json[0]["ticker"] == "AAPL"
+    assert "símbolo inexistente" in run.errors_json[0]["error"]
+
+
+# --- reap_stale_running_runs ------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_reap_stale_running_runs_marks_old_running_run_as_failed(stock_source):
+    stale_run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.RUNNING,
+        started_at=timezone.now() - timedelta(minutes=30),
+    )
+
+    reaped = reap_stale_running_runs(stale_after_minutes=15)
+
+    stale_run.refresh_from_db()
+    assert reaped == 1
+    assert stale_run.status == IngestionRun.Status.FAILED
+    assert stale_run.finished_at is not None
+    assert len(stale_run.errors_json) == 1
+    assert "FAILED automáticamente" in stale_run.errors_json[0]["error"]
+    assert "15min" in stale_run.errors_json[0]["error"]
+
+
+@pytest.mark.django_db
+def test_reap_stale_running_runs_leaves_recent_running_run_untouched(stock_source):
+    recent_run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.RUNNING,
+        started_at=timezone.now() - timedelta(minutes=5),
+    )
+
+    reaped = reap_stale_running_runs(stale_after_minutes=15)
+
+    recent_run.refresh_from_db()
+    assert reaped == 0
+    assert recent_run.status == IngestionRun.Status.RUNNING
+    assert recent_run.finished_at is None
+    assert recent_run.errors_json == []

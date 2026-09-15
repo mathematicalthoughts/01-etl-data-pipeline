@@ -1,8 +1,10 @@
+from datetime import timedelta
 from io import StringIO
 from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
+from django.utils import timezone
 
 from ingestion.models import DataSource, IngestionRun
 from ingestion.services import IngestionError
@@ -80,3 +82,30 @@ def test_run_ingestions_now_does_nothing_when_no_active_stock_sources():
     mocked.assert_not_called()
     assert "0 fuente(s) OK" in out.getvalue()
     assert "0 fuente(s) fallida(s)" in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_run_ingestions_now_reaps_stale_running_runs_before_scheduling():
+    """
+    Un run que quedó colgado en RUNNING (proceso anterior muerto a mitad de
+    camino) debe auto-sanearse a FAILED antes de programar ingestas nuevas.
+    """
+    source = DataSource.objects.create(
+        name="watchlist-vieja",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": []},
+        active=False,
+    )
+    stale_run = IngestionRun.objects.create(
+        source=source,
+        status=IngestionRun.Status.RUNNING,
+        started_at=timezone.now() - timedelta(minutes=30),
+    )
+
+    out = StringIO()
+    call_command("run_ingestions_now", stdout=out)
+
+    stale_run.refresh_from_db()
+    assert stale_run.status == IngestionRun.Status.FAILED
+    assert stale_run.finished_at is not None
+    assert "colgado" in out.getvalue()

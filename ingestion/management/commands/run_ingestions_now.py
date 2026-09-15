@@ -1,5 +1,6 @@
 from django.core.management.base import BaseCommand
 
+from ingestion.services import reap_stale_running_runs
 from ingestion.tasks import run_scheduled_ingestions
 
 
@@ -13,6 +14,15 @@ class Command(BaseCommand):
     )
 
     def handle(self, *args, **options):
+        reaped = reap_stale_running_runs()
+        if reaped:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"run_ingestions_now: {reaped} run(s) colgado(s) en "
+                    "RUNNING marcado(s) como FAILED (probable crash previo)."
+                )
+            )
+
         result = run_scheduled_ingestions()
 
         succeeded = result["succeeded"]

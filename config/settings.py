@@ -15,6 +15,7 @@ from pathlib import Path
 
 import dj_database_url
 from decouple import Csv, config
+from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -86,9 +87,21 @@ WSGI_APPLICATION = "config.wsgi.application"
 # DATABASE_SSL_REQUIRE se desactiva solo en CI, donde el servicio de Postgres
 # de GitHub Actions no expone SSL (Neon en dev/prod sí lo exige siempre).
 
+# Validación explícita antes de dj_database_url.parse(): un DATABASE_URL vacío
+# o mal formado (ej. un secret de GitHub Actions mal seteado) produce un
+# ImproperlyConfigured legible en vez del traceback críptico de
+# dj_database_url ("Scheme '://' is unknown").
+DATABASE_URL_RAW = config("DATABASE_URL", default="")
+if not DATABASE_URL_RAW or "://" not in DATABASE_URL_RAW or DATABASE_URL_RAW.startswith("://"):
+    raise ImproperlyConfigured(
+        "DATABASE_URL no está seteada o es inválida. Verificá el secret en el "
+        "entorno de despliegue (no debe incluir el prefijo 'DATABASE_URL=' ni "
+        "comillas -- solo la connection string, ej. postgresql://user:pass@host/db)."
+    )
+
 DATABASES = {
     "default": dj_database_url.parse(
-        config("DATABASE_URL"),
+        DATABASE_URL_RAW,
         conn_max_age=600,
         ssl_require=config("DATABASE_SSL_REQUIRE", default=True, cast=bool),
     )
