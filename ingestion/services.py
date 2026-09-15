@@ -14,6 +14,16 @@ class IngestionError(Exception):
     """Error de validación antes de poder lanzar una corrida de ingesta."""
 
 
+# yf.Ticker(ticker).history(period=...) sirve igual para una acción que para
+# un future de commodity (ej. HG=F) -- mismo fetch, sin lógica nueva. Un
+# macro_indicator sí necesitaría una fuente de datos distinta, así que ese
+# tipo se sigue rechazando.
+INGESTABLE_SOURCE_TYPES = {
+    DataSource.SourceType.STOCK_PRICE,
+    DataSource.SourceType.COMMODITY,
+}
+
+
 def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun:
     """
     Descarga OHLCV de yfinance para los tickers de `source.config_json` y los
@@ -22,10 +32,11 @@ def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun
     Usado tanto por el management command `ingest_source` como por el
     endpoint `POST /api/sources/{id}/trigger/`.
     """
-    if source.type != DataSource.SourceType.STOCK_PRICE:
+    if source.type not in INGESTABLE_SOURCE_TYPES:
+        allowed = ", ".join(sorted(INGESTABLE_SOURCE_TYPES))
         raise IngestionError(
             f"DataSource '{source.name}' es de tipo '{source.type}', "
-            f"se esperaba '{DataSource.SourceType.STOCK_PRICE}'."
+            f"se esperaba uno de: {allowed}."
         )
 
     if not source.active:

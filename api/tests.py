@@ -219,10 +219,12 @@ def test_trigger_returns_400_and_no_run_when_source_is_inactive(api_client):
 
 @pytest.mark.django_db
 def test_trigger_returns_400_when_source_is_wrong_type(api_client):
+    # macro_indicator sigue rechazado (a diferencia de commodity, que ahora
+    # sí se puede ingerir vía yfinance como cualquier stock_price).
     source = DataSource.objects.create(
-        name="cobre-lme",
-        type=DataSource.SourceType.COMMODITY,
-        config_json={"tickers": ["HG=F"]},
+        name="watchlist-macro",
+        type=DataSource.SourceType.MACRO_INDICATOR,
+        config_json={"tickers": ["CPI"]},
     )
 
     response = api_client.post(f"/api/sources/{source.id}/trigger/", data={}, format="json")

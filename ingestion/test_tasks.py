@@ -8,6 +8,17 @@ from ingestion.services import IngestionError
 from ingestion.tasks import run_scheduled_ingestions
 
 
+@pytest.fixture(autouse=True)
+def _clear_seeded_datasources(db):
+    """
+    La data migration 0003 siembra DataSource activos de producción
+    (watchlist-cobre, cobre-futuro-comex). Estos tests ejercitan
+    run_scheduled_ingestions() en aislamiento total sobre fixtures propios,
+    así que arrancan de una tabla vacía en vez de heredar ese seed.
+    """
+    DataSource.objects.all().delete()
+
+
 @pytest.mark.django_db
 def test_run_scheduled_ingestions_calls_run_ingestion_for_each_active_stock_source():
     DataSource.objects.create(
@@ -37,7 +48,7 @@ def test_run_scheduled_ingestions_calls_run_ingestion_for_each_active_stock_sour
 
 
 @pytest.mark.django_db
-def test_run_scheduled_ingestions_ignores_inactive_and_non_stock_sources():
+def test_run_scheduled_ingestions_ignores_inactive_and_macro_indicator_sources():
     DataSource.objects.create(
         name="inactiva",
         type=DataSource.SourceType.STOCK_PRICE,
@@ -45,9 +56,9 @@ def test_run_scheduled_ingestions_ignores_inactive_and_non_stock_sources():
         active=False,
     )
     DataSource.objects.create(
-        name="cobre-lme",
-        type=DataSource.SourceType.COMMODITY,
-        config_json={"tickers": ["HG=F"]},
+        name="watchlist-macro",
+        type=DataSource.SourceType.MACRO_INDICATOR,
+        config_json={"tickers": ["CPI"]},
         active=True,
     )
 
@@ -56,6 +67,37 @@ def test_run_scheduled_ingestions_ignores_inactive_and_non_stock_sources():
 
     mocked.assert_not_called()
     assert result == {"succeeded": [], "failed": []}
+
+
+@pytest.mark.django_db
+def test_run_scheduled_ingestions_includes_commodity_sources():
+    """
+    commodity se ingiere igual que stock_price (mismo fetch de yfinance),
+    así que el scheduler también debe recogerlo.
+    """
+    stock = DataSource.objects.create(
+        name="watchlist-cobre",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": ["FCX"]},
+        active=True,
+    )
+    commodity = DataSource.objects.create(
+        name="cobre-futuro-comex",
+        type=DataSource.SourceType.COMMODITY,
+        config_json={"tickers": ["HG=F"]},
+        active=True,
+    )
+
+    def fake_run_ingestion(source, **kwargs):
+        return IngestionRun.objects.create(source=source, status=IngestionRun.Status.SUCCESS)
+
+    with patch("ingestion.tasks.run_ingestion", side_effect=fake_run_ingestion) as mocked:
+        result = run_scheduled_ingestions()
+
+    called_sources = {call.args[0].name for call in mocked.call_args_list}
+    assert called_sources == {stock.name, commodity.name}
+    assert len(result["succeeded"]) == 2
+    assert result["failed"] == []
 
 
 @pytest.mark.django_db

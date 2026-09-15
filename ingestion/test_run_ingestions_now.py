@@ -8,6 +8,17 @@ from ingestion.models import DataSource, IngestionRun
 from ingestion.services import IngestionError
 
 
+@pytest.fixture(autouse=True)
+def _clear_seeded_datasources(db):
+    """
+    La data migration 0003 siembra DataSource activos de producción
+    (watchlist-cobre, cobre-futuro-comex). Estos tests ejercitan el
+    management command en aislamiento total sobre fixtures propios, así que
+    arrancan de una tabla vacía en vez de heredar ese seed.
+    """
+    DataSource.objects.all().delete()
+
+
 @pytest.mark.django_db
 def test_run_ingestions_now_runs_synchronously_without_celery():
     """

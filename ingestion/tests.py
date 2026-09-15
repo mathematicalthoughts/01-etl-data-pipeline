@@ -200,13 +200,42 @@ def test_ingest_source_raises_when_data_source_missing():
 
 @pytest.mark.django_db
 def test_ingest_source_raises_when_wrong_type(db):
+    """
+    macro_indicator sigue rechazado: a diferencia de commodity, requeriría
+    una fuente de datos distinta de yfinance.
+    """
     DataSource.objects.create(
-        name="cobre-lme",
-        type=DataSource.SourceType.COMMODITY,
-        config_json={"tickers": ["HG=F"]},
+        name="watchlist-macro",
+        type=DataSource.SourceType.MACRO_INDICATOR,
+        config_json={"tickers": ["CPI"]},
     )
     with pytest.raises(CommandError, match="tipo"):
+        call_command("ingest_source", "watchlist-macro")
+
+
+@pytest.mark.django_db
+def test_ingest_source_success_for_commodity_type(db):
+    """
+    yf.Ticker(ticker).history(period=...) sirve igual para un future de
+    commodity (ej. HG=F) que para una acción: sin lógica nueva de fetching.
+    """
+    commodity_source = DataSource.objects.create(
+        name="cobre-lme",
+        type=DataSource.SourceType.COMMODITY,
+        config_json={"tickers": ["HG=F"], "period": "5d"},
+        active=True,
+    )
+    history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 4.5, "high": 4.6, "low": 4.4, "close": 4.55, "volume": 500}]
+    )
+
+    with patch(PATCH_TARGET, side_effect=mock_ticker_returning({"HG=F": history})):
         call_command("ingest_source", "cobre-lme")
+
+    run = IngestionRun.objects.get(source=commodity_source)
+    assert run.status == IngestionRun.Status.SUCCESS
+    assert run.rows_ingested == 1
+    assert PriceRecord.objects.filter(source=commodity_source, ticker="HG=F").count() == 1
 
 
 @pytest.mark.django_db
