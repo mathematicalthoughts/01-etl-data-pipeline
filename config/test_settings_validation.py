@@ -58,3 +58,27 @@ def test_valid_database_url_does_not_raise_and_configures_database(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(settings_module)
+
+
+# --- ALLOWED_HOSTS + RENDER_EXTERNAL_HOSTNAME -------------------------------
+
+
+def test_render_external_hostname_is_added_to_allowed_hosts(monkeypatch):
+    monkeypatch.setenv("RENDER_EXTERNAL_HOSTNAME", "etl-pipeline-abcd.onrender.com")
+    try:
+        importlib.reload(settings_module)
+        assert "etl-pipeline-abcd.onrender.com" in settings_module.ALLOWED_HOSTS
+        assert "localhost" in settings_module.ALLOWED_HOSTS  # se suma, no reemplaza
+    finally:
+        monkeypatch.undo()
+        importlib.reload(settings_module)
+
+
+def test_no_render_external_hostname_leaves_allowed_hosts_unaffected(monkeypatch):
+    monkeypatch.delenv("RENDER_EXTERNAL_HOSTNAME", raising=False)
+    try:
+        importlib.reload(settings_module)
+        assert "" not in settings_module.ALLOWED_HOSTS
+    finally:
+        monkeypatch.undo()
+        importlib.reload(settings_module)

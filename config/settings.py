@@ -32,6 +32,14 @@ DEBUG = config("DEBUG", default=False, cast=bool)
 
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=Csv())
 
+# Render inyecta RENDER_EXTERNAL_HOSTNAME automáticamente en cada servicio
+# (ej. "etl-pipeline-abcd.onrender.com"). Lo sumamos a lo que venga de
+# ALLOWED_HOSTS en vez de reemplazarlo, para no perder localhost/127.0.0.1
+# en dev ni cualquier host extra seteado a mano.
+RENDER_EXTERNAL_HOSTNAME = config("RENDER_EXTERNAL_HOSTNAME", default="")
+if RENDER_EXTERNAL_HOSTNAME and RENDER_EXTERNAL_HOSTNAME not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+
 
 # Application definition
 

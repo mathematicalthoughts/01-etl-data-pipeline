@@ -1,6 +1,6 @@
 # ETL / Data Pipeline — Market & Commodities Data
 
-> **Estado:** 🚧 en construcción (Fase 1 del roadmap del portafolio)
+> **Estado:** ✅ Fase 1 completa — desplegado en producción, cron real ingiriendo datos de mercado.
 
 <!-- GIF o captura del demo funcionando va aquí -->
 
@@ -8,7 +8,9 @@
 Ingesta, valida y normaliza datos de precios de mercado y commodities desde múltiples fuentes en un solo modelo consultable, con observabilidad de calidad de datos y un resumen en lenguaje natural de cada corrida (generado por IA).
 
 ## Demo
-🔗 (link al deploy en Render — agregar cuando esté desplegado)
+🔗 https://zero1-etl-data-pipeline.onrender.com/
+
+*(el servicio puede tardar unos segundos en la primera carga si el ping de keep-alive falló — corre un ping cada 10 min vía cron-job.org para evitar el cold start del free tier de Render)*
 
 ## Arquitectura
 <!-- Diagrama simple: fuentes → ingestion → validación/limpieza → API → agente de resumen -->
@@ -47,6 +49,6 @@ pytest --cov
 > `pytest --create-db` una vez para forzar la recreación del esquema de test.
 
 ## Roadmap futuro
-- [ ] Agregar fuente de datos de commodities (cobre) relevante para minería
+- [x] Agregar fuente de datos de commodities (cobre) relevante para minería — ✅ en producción (`cobre-futuro-comex`)
 - [ ] Dashboard de calidad de datos con series históricas de completitud
 - [ ] Alertas automáticas cuando una fuente falla 2+ veces seguidas
