@@ -26,6 +26,14 @@
     <div class="kpi-value">{{ run.rows_ingested }}</div>
   </div>
   <div class="kpi">
+    <div class="kpi-label">Nuevas</div>
+    <div class="kpi-value">{{ run.rows_created }}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Actualizadas</div>
+    <div class="kpi-value">{{ run.rows_updated }}</div>
+  </div>
+  <div class="kpi">
     <div class="kpi-label">Tickers OK</div>
     <div class="kpi-value">{{ report.tickers_ingested|length }} de {{ tickers_total_count }}</div>
   </div>

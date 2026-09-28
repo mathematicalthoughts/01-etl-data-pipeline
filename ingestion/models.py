@@ -36,6 +36,8 @@ class IngestionRun(models.Model):
         max_length=16, choices=Status.choices, default=Status.PENDING
     )
     rows_ingested = models.PositiveIntegerField(default=0)
+    rows_created = models.PositiveIntegerField(default=0)
+    rows_updated = models.PositiveIntegerField(default=0)
     errors_json = models.JSONField(default=list, blank=True)
     summary = models.TextField(blank=True, default="")
     started_at = models.DateTimeField(null=True, blank=True)
@@ -71,6 +73,8 @@ class IngestionRun(models.Model):
             "source": self.source.name,
             "status": self.status,
             "rows_ingested": self.rows_ingested,
+            "rows_created": self.rows_created,
+            "rows_updated": self.rows_updated,
             "errors_json": self.errors_json,
             "tickers_ingested": tickers_ingested,
             "tickers_failed": tickers_failed,

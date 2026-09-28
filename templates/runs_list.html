@@ -19,13 +19,14 @@
 <div class="panel grow">
   <div class="panel-body">
     <table>
-      <tr><th>Run</th><th>Fuente</th><th>Estado</th><th>Filas</th><th>Errores</th><th>Inicio</th><th>Duración</th></tr>
+      <tr><th>Run</th><th>Fuente</th><th>Estado</th><th>Filas</th><th>Nuevas / Actualizadas</th><th>Errores</th><th>Inicio</th><th>Duración</th></tr>
       {% for run in runs %}
       <tr>
         <td class="mono"><a href="{% url 'run_detail' run.pk %}">#{{ run.pk }}</a></td>
         <td class="name"><a href="{% url 'source_detail' run.source.pk %}">{{ run.source.name }}</a></td>
         <td>{% include "partials/_status_badge.html" with status=run.status %}</td>
         <td class="mono">{{ run.rows_ingested }}</td>
+        <td class="mono">{{ run.rows_created }} / {{ run.rows_updated }}</td>
         <td{% if run.first_error %} class="err"{% endif %}>{{ run.first_error|default:"—" }}</td>
         <td>hace {{ run.created_at|timesince }}</td>
         <td class="mono">
@@ -33,7 +34,7 @@
         </td>
       </tr>
       {% empty %}
-      <tr><td colspan="7">No hay corridas para este filtro.</td></tr>
+      <tr><td colspan="8">No hay corridas para este filtro.</td></tr>
       {% endfor %}
     </table>
   </div>

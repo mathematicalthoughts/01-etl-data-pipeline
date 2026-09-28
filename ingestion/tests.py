@@ -689,3 +689,113 @@ def test_generate_run_summary_retries_transient_429_then_succeeds(stock_source):
     run.refresh_from_db()
     assert run.summary == "Resumen exitoso tras rate limit."
     assert mocked_sleep.call_count == 2
+
+
+# --- rows_created / rows_updated tracking -----------------------------------
+
+
+@pytest.mark.django_db
+def test_rows_created_on_first_ingestion(stock_source):
+    """
+    (a) Primera ingesta de 2 filas para un ticker/fecha nuevo → rows_created==2,
+    rows_updated==0, rows_ingested==2.
+    """
+    stock_source.config_json = {"tickers": ["AAPL"], "period": "5d"}
+    stock_source.save()
+
+    history = make_history_df(
+        [
+            {"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 11, "volume": 1000},
+            {"date": date(2026, 1, 3), "open": 11, "high": 13, "low": 10, "close": 12, "volume": 1500},
+        ]
+    )
+    fake_client = make_fake_gemini_client()
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        run = run_ingestion(stock_source)
+
+    assert run.rows_created == 2
+    assert run.rows_updated == 0
+    assert run.rows_ingested == 2
+
+
+@pytest.mark.django_db
+def test_rows_updated_on_second_ingestion_with_same_data(stock_source):
+    """
+    (b) Segunda ingesta con el mismo ticker+fecha → second run: rows_created==0,
+    rows_updated==1, rows_ingested==1.
+    """
+    stock_source.config_json = {"tickers": ["AAPL"], "period": "5d"}
+    stock_source.save()
+
+    history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 11, "volume": 1000}]
+    )
+    fake_client = make_fake_gemini_client()
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        run_ingestion(stock_source)
+
+    updated_history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 15, "volume": 9999}]
+    )
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": updated_history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        second_run = run_ingestion(stock_source)
+
+    assert second_run.rows_created == 0
+    assert second_run.rows_updated == 1
+    assert second_run.rows_ingested == 1
+
+
+@pytest.mark.django_db
+def test_rows_ingested_equals_created_plus_updated(stock_source):
+    """
+    (c) Partial run: un ticker nuevo + un ticker ya existente → rows_ingested
+    == rows_created + rows_updated siempre.
+    """
+    stock_source.config_json = {"tickers": ["AAPL"], "period": "5d"}
+    stock_source.save()
+
+    first_history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 11, "volume": 1000}]
+    )
+    fake_client = make_fake_gemini_client()
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": first_history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        run_ingestion(stock_source)
+
+    stock_source.config_json = {"tickers": ["AAPL", "MSFT"], "period": "5d"}
+    stock_source.save()
+
+    aapl_history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 15, "volume": 9999}]
+    )
+    msft_history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 20, "high": 22, "low": 19, "close": 21, "volume": 2000}]
+    )
+
+    with (
+        patch(
+            PATCH_TARGET,
+            side_effect=mock_ticker_returning({"AAPL": aapl_history, "MSFT": msft_history}),
+        ),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        second_run = run_ingestion(stock_source)
+
+    assert second_run.rows_ingested == second_run.rows_created + second_run.rows_updated
+    assert second_run.rows_created == 1   # MSFT date is new
+    assert second_run.rows_updated == 1   # AAPL date already existed

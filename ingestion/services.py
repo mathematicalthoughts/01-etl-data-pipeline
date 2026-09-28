@@ -122,6 +122,8 @@ def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun
     )
 
     rows_ingested = 0
+    rows_created_count = 0
+    rows_updated_count = 0
     errors = []
 
     for ticker in tickers:
@@ -139,7 +141,7 @@ def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun
 
         for index, row in history.iterrows():
             try:
-                PriceRecord.objects.update_or_create(
+                _, created_flag = PriceRecord.objects.update_or_create(
                     source=source,
                     ticker=ticker,
                     date=index.date(),
@@ -152,6 +154,10 @@ def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun
                         "volume": int(row["Volume"]),
                     },
                 )
+                if created_flag:
+                    rows_created_count += 1
+                else:
+                    rows_updated_count += 1
                 rows_ingested += 1
             except Exception as exc:
                 errors.append(
@@ -160,6 +166,8 @@ def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun
 
     run.finished_at = timezone.now()
     run.rows_ingested = rows_ingested
+    run.rows_created = rows_created_count
+    run.rows_updated = rows_updated_count
     run.errors_json = errors
 
     if errors and rows_ingested == 0:
