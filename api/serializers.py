@@ -29,6 +29,8 @@ class IngestionRunSerializer(serializers.ModelSerializer):
             "source_name",
             "status",
             "rows_ingested",
+            "rows_created",
+            "rows_updated",
             "errors_json",
             "summary",
             "started_at",
@@ -62,6 +64,8 @@ class QualityReportSerializer(serializers.Serializer):
     source = serializers.CharField()
     status = serializers.CharField()
     rows_ingested = serializers.IntegerField()
+    rows_created = serializers.IntegerField()
+    rows_updated = serializers.IntegerField()
     errors_json = serializers.JSONField()
     tickers_ingested = serializers.ListField(child=serializers.CharField())
     tickers_failed = serializers.ListField(child=serializers.CharField())

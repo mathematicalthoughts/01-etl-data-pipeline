@@ -2,11 +2,13 @@ import logging
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pandas as pd
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.utils import timezone
+from google.genai import errors as genai_errors
 
 from ingestion.models import DataSource, IngestionRun, PriceRecord
 from ingestion.services import generate_run_summary, reap_stale_running_runs, run_ingestion
@@ -317,28 +319,36 @@ def test_generate_run_summary_saves_text_from_gemini(stock_source):
 
 @pytest.mark.django_db
 def test_generate_run_summary_strips_whitespace_only_text(stock_source):
+    # Whitespace-only response counts as empty → retries exhausted → fallback
     run = IngestionRun.objects.create(source=stock_source, status=IngestionRun.Status.SUCCESS)
     fake_client = make_fake_gemini_client("   \n  ")
 
-    with patch(GEMINI_PATCH_TARGET, return_value=fake_client):
+    with (
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+        patch("ingestion.services.time.sleep"),
+    ):
         summary = generate_run_summary(run)
 
-    assert summary == ""
+    assert summary.startswith("[Resumen automático sin LLM]")
     run.refresh_from_db()
-    assert run.summary == ""
+    assert run.summary.startswith("[Resumen automático sin LLM]")
 
 
 @pytest.mark.django_db
 def test_generate_run_summary_handles_none_text(stock_source):
+    # None response counts as empty → retries exhausted → fallback
     run = IngestionRun.objects.create(source=stock_source, status=IngestionRun.Status.SUCCESS)
     fake_client = make_fake_gemini_client(None)
 
-    with patch(GEMINI_PATCH_TARGET, return_value=fake_client):
+    with (
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+        patch("ingestion.services.time.sleep"),
+    ):
         summary = generate_run_summary(run)
 
-    assert summary == ""
+    assert summary.startswith("[Resumen automático sin LLM]")
     run.refresh_from_db()
-    assert run.summary == ""
+    assert run.summary.startswith("[Resumen automático sin LLM]")
 
 
 @pytest.mark.django_db
@@ -372,7 +382,7 @@ def test_run_ingestion_survives_gemini_failure_and_logs_it(stock_source, caplog)
 
     assert run.status == IngestionRun.Status.SUCCESS
     assert run.rows_ingested == 1
-    assert run.summary == ""
+    assert run.summary.startswith("[Resumen automático sin LLM]")
     assert "resumen de Gemini" in caplog.text
     assert str(run.id) in caplog.text
 
@@ -513,3 +523,514 @@ def test_reap_stale_running_runs_leaves_recent_running_run_untouched(stock_sourc
     assert recent_run.status == IngestionRun.Status.RUNNING
     assert recent_run.finished_at is None
     assert recent_run.errors_json == []
+
+
+# --- generate_run_summary: retry con backoff para errores Gemini transitorios ---
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_retries_transient_503_then_succeeds(stock_source):
+    """
+    (a) Gemini falla 2 veces con ServerError(503) luego tiene éxito en el 3er
+    intento: el summary final debe ser el texto del LLM, no el fallback.
+    """
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+    )
+
+    server_error = genai_errors.ServerError(
+        503, {"error": {"code": 503, "message": "Service Unavailable", "status": "UNAVAILABLE"}}
+    )
+    fake_response = MagicMock()
+    fake_response.text = "Resumen exitoso tras reintentos."
+    fake_client_success = MagicMock()
+    fake_client_success.models.generate_content.return_value = fake_response
+
+    # genai.Client is called once per attempt; first 2 raise, 3rd returns good client
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=[server_error, server_error, fake_client_success]),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary == "Resumen exitoso tras reintentos."
+    assert not summary.startswith("[Resumen automático sin LLM]")
+    run.refresh_from_db()
+    assert run.summary == "Resumen exitoso tras reintentos."
+    # 2 sleeps between attempts 1->2 and 2->3
+    assert mocked_sleep.call_count == 2
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_falls_back_after_all_503_retries_exhausted(stock_source):
+    """
+    (b) Gemini falla siempre con ServerError(503): tras MAX_SUMMARY_ATTEMPTS
+    intentos el summary debe empezar con '[Resumen automático sin LLM]'.
+    """
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=2,
+    )
+
+    server_error = genai_errors.ServerError(
+        503, {"error": {"code": 503, "message": "Service Unavailable", "status": "UNAVAILABLE"}}
+    )
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=server_error),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary.startswith("[Resumen automático sin LLM]")
+    run.refresh_from_db()
+    assert run.summary.startswith("[Resumen automático sin LLM]")
+    # 2 sleeps between the 3 attempts
+    assert mocked_sleep.call_count == 2
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_falls_back_immediately_on_non_transient_400(stock_source):
+    """
+    (c) Gemini devuelve un 400 ClientError (no transitorio): no debe reintentar
+    (1 sola llamada), y el summary debe empezar con '[Resumen automático sin LLM]'.
+    """
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.FAILED,
+        rows_ingested=0,
+    )
+
+    client_400_error = genai_errors.ClientError(
+        400, {"error": {"code": 400, "message": "Bad Request", "status": "INVALID_ARGUMENT"}}
+    )
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=client_400_error) as mocked_cls,
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary.startswith("[Resumen automático sin LLM]")
+    run.refresh_from_db()
+    assert run.summary.startswith("[Resumen automático sin LLM]")
+    # No retries: genai.Client called exactly once
+    assert mocked_cls.call_count == 1
+    mocked_sleep.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_backfill_run_summaries_updates_empty_summaries_and_is_idempotent(stock_source, capsys):
+    """
+    (d) El comando backfill_run_summaries actualiza exactamente los runs con
+    summary vacío y estado SUCCESS/PARTIAL. Re-ejecutar no cambia nada.
+    """
+    run1 = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+        summary="",
+    )
+    run2 = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.PARTIAL,
+        rows_ingested=0,
+        summary="",
+    )
+    run3 = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=3,
+        summary="Resumen ya existente.",
+    )
+
+    call_command("backfill_run_summaries")
+
+    captured = capsys.readouterr()
+    assert "2" in captured.out
+
+    run1.refresh_from_db()
+    run2.refresh_from_db()
+    run3.refresh_from_db()
+
+    assert run1.summary.startswith("[Resumen automático sin LLM]")
+    assert run2.summary.startswith("[Resumen automático sin LLM]")
+    assert run3.summary == "Resumen ya existente."
+
+    # Idempotency: re-running should update 0 runs
+    call_command("backfill_run_summaries")
+    captured2 = capsys.readouterr()
+    assert "0" in captured2.out
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_retries_transient_429_then_succeeds(stock_source):
+    """
+    429 ClientError (rate limit) es transitorio: 2 fallos seguidos de éxito
+    → el summary final debe ser el texto del LLM, no el fallback.
+    """
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+    )
+
+    rate_limit_error = genai_errors.ClientError(
+        429, {"error": {"code": 429, "message": "Too Many Requests", "status": "RESOURCE_EXHAUSTED"}}
+    )
+
+    fake_response = MagicMock()
+    fake_response.text = "Resumen exitoso tras rate limit."
+    fake_client_success = MagicMock()
+    fake_client_success.models.generate_content.return_value = fake_response
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=[rate_limit_error, rate_limit_error, fake_client_success]),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary == "Resumen exitoso tras rate limit."
+    assert not summary.startswith("[Resumen automático sin LLM]")
+    run.refresh_from_db()
+    assert run.summary == "Resumen exitoso tras rate limit."
+    assert mocked_sleep.call_count == 2
+
+
+# --- rows_created / rows_updated tracking -----------------------------------
+
+
+@pytest.mark.django_db
+def test_rows_created_on_first_ingestion(stock_source):
+    """
+    (a) Primera ingesta de 2 filas para un ticker/fecha nuevo → rows_created==2,
+    rows_updated==0, rows_ingested==2.
+    """
+    stock_source.config_json = {"tickers": ["AAPL"], "period": "5d"}
+    stock_source.save()
+
+    history = make_history_df(
+        [
+            {"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 11, "volume": 1000},
+            {"date": date(2026, 1, 3), "open": 11, "high": 13, "low": 10, "close": 12, "volume": 1500},
+        ]
+    )
+    fake_client = make_fake_gemini_client()
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        run = run_ingestion(stock_source)
+
+    assert run.rows_created == 2
+    assert run.rows_updated == 0
+    assert run.rows_ingested == 2
+
+
+@pytest.mark.django_db
+def test_rows_updated_on_second_ingestion_with_same_data(stock_source):
+    """
+    (b) Segunda ingesta con el mismo ticker+fecha → second run: rows_created==0,
+    rows_updated==1, rows_ingested==1.
+    """
+    stock_source.config_json = {"tickers": ["AAPL"], "period": "5d"}
+    stock_source.save()
+
+    history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 11, "volume": 1000}]
+    )
+    fake_client = make_fake_gemini_client()
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        run_ingestion(stock_source)
+
+    updated_history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 15, "volume": 9999}]
+    )
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": updated_history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        second_run = run_ingestion(stock_source)
+
+    assert second_run.rows_created == 0
+    assert second_run.rows_updated == 1
+    assert second_run.rows_ingested == 1
+
+
+@pytest.mark.django_db
+def test_rows_ingested_equals_created_plus_updated(stock_source):
+    """
+    (c) Partial run: un ticker nuevo + un ticker ya existente → rows_ingested
+    == rows_created + rows_updated siempre.
+    """
+    stock_source.config_json = {"tickers": ["AAPL"], "period": "5d"}
+    stock_source.save()
+
+    first_history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 11, "volume": 1000}]
+    )
+    fake_client = make_fake_gemini_client()
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAPL": first_history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        run_ingestion(stock_source)
+
+    stock_source.config_json = {"tickers": ["AAPL", "MSFT"], "period": "5d"}
+    stock_source.save()
+
+    aapl_history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 10, "high": 12, "low": 9, "close": 15, "volume": 9999}]
+    )
+    msft_history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 20, "high": 22, "low": 19, "close": 21, "volume": 2000}]
+    )
+
+    with (
+        patch(
+            PATCH_TARGET,
+            side_effect=mock_ticker_returning({"AAPL": aapl_history, "MSFT": msft_history}),
+        ),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        second_run = run_ingestion(stock_source)
+
+    assert second_run.rows_ingested == second_run.rows_created + second_run.rows_updated
+    assert second_run.rows_created == 1   # MSFT date is new
+    assert second_run.rows_updated == 1   # AAPL date already existed
+
+
+# --- ticker_stats / quality_report() estabilidad ----------------------------
+
+
+@pytest.fixture
+def two_ticker_source(db):
+    return DataSource.objects.create(
+        name="multi-ticker",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": ["AAA", "BBB"], "period": "5d"},
+        active=True,
+    )
+
+
+@pytest.mark.django_db
+def test_quality_report_stable_after_second_run(two_ticker_source):
+    """
+    La primera corrida guarda ticker_stats propio. La segunda corrida reasigna
+    los PriceRecord a sí misma, pero quality_report() de la primera sigue
+    listando sus tickers desde ticker_stats (no desde price_records).
+    """
+    fake_client = make_fake_gemini_client()
+    history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 100}]
+    )
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAA": history, "BBB": history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        first_run = run_ingestion(two_ticker_source)
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAA": history, "BBB": history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        run_ingestion(two_ticker_source)
+
+    # After second run, first run's quality_report must still list its tickers
+    first_run.refresh_from_db()
+    report = first_run.quality_report()
+    assert set(report["tickers_ingested"]) == {"AAA", "BBB"}
+    assert report["tickers_failed"] == []
+    assert "legacy" not in report
+
+
+@pytest.mark.django_db
+def test_quality_report_mixed_ticker_goes_to_ingested(db):
+    """
+    Un ticker con filas exitosas Y errores en algunas filas se clasifica como
+    ingerido (no fallido) porque created+updated > 0.
+    """
+    source = DataSource.objects.create(
+        name="src-mixto",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": ["MIX"], "period": "5d"},
+        active=True,
+    )
+    run = IngestionRun.objects.create(
+        source=source,
+        status=IngestionRun.Status.PARTIAL,
+        rows_ingested=2,
+        rows_created=2,
+        rows_updated=0,
+        ticker_stats={"MIX": {"created": 2, "updated": 0, "errors": 1}},
+        errors_json=[{"ticker": "MIX", "date": "2026-01-03", "error": "volume NaN"}],
+    )
+
+    report = run.quality_report()
+    assert "MIX" in report["tickers_ingested"]
+    assert "MIX" not in report["tickers_failed"]
+    assert report["success_rate"] == 100.0
+
+
+@pytest.mark.django_db
+def test_quality_report_legacy_run_returns_legacy_flag(db):
+    """Corrida sin ticker_stats (legacy) marca 'legacy': True en el reporte."""
+    source = DataSource.objects.create(
+        name="src-legacy",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": ["OLD"], "period": "5d"},
+        active=True,
+    )
+    run = IngestionRun.objects.create(
+        source=source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=10,
+        ticker_stats={},  # empty == legacy
+    )
+
+    report = run.quality_report()
+    assert report.get("legacy") is True
+
+
+@pytest.mark.django_db
+def test_fallback_summary_legacy_run_uses_generic_message(db):
+    """Corrida legacy → fallback con 'Detalle por instrumento no disponible'."""
+    from ingestion.services import _build_fallback_summary
+
+    source = DataSource.objects.create(
+        name="src-legacy2",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": ["OLD"], "period": "5d"},
+        active=True,
+    )
+    run = IngestionRun.objects.create(
+        source=source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=168,
+        ticker_stats={},
+    )
+
+    summary = _build_fallback_summary(run)
+    assert summary.startswith("[Resumen automático sin LLM]")
+    assert "Detalle por instrumento no disponible" in summary
+    assert "Tickers OK" not in summary
+
+
+# --- clasificación de errores transitorios y respuesta vacía -----------------
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_empty_text_falls_back(stock_source):
+    """Gemini devuelve text=None en todos los intentos → fallback determinístico."""
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+        ticker_stats={"AAPL": {"created": 1, "updated": 0, "errors": 0}},
+    )
+
+    empty_response = MagicMock()
+    empty_response.text = None
+    fake_client_empty = MagicMock()
+    fake_client_empty.models.generate_content.return_value = empty_response
+
+    with (
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client_empty),
+        patch("ingestion.services.time.sleep"),
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary.startswith("[Resumen automático sin LLM]")
+    run.refresh_from_db()
+    assert run.summary.startswith("[Resumen automático sin LLM]")
+
+
+@pytest.mark.django_db
+def test_is_transient_server_error_retried(stock_source):
+    """genai_errors.ServerError (cualquier 5xx) es transitorio y dispara reintentos."""
+    from google.genai import errors as genai_errors_local
+
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+        ticker_stats={"AAPL": {"created": 1, "updated": 0, "errors": 0}},
+    )
+
+    server_error = genai_errors_local.ServerError(
+        503, {"error": {"code": 503, "message": "Service Unavailable", "status": "UNAVAILABLE"}}
+    )
+    fake_response = MagicMock()
+    fake_response.text = "Resumen tras 503."
+    fake_client_ok = MagicMock()
+    fake_client_ok.models.generate_content.return_value = fake_response
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=[server_error, fake_client_ok]),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary == "Resumen tras 503."
+    assert mocked_sleep.call_count == 1
+
+
+@pytest.mark.django_db
+def test_is_transient_httpx_transport_error_retried(stock_source):
+    """httpx.TransportError (incluye TimeoutException) es transitorio y dispara reintentos."""
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+        ticker_stats={"AAPL": {"created": 1, "updated": 0, "errors": 0}},
+    )
+
+    timeout_error = httpx.TimeoutException("timed out")
+    fake_response = MagicMock()
+    fake_response.text = "Resumen tras timeout."
+    fake_client_ok = MagicMock()
+    fake_client_ok.models.generate_content.return_value = fake_response
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=[timeout_error, fake_client_ok]),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary == "Resumen tras timeout."
+    assert mocked_sleep.call_count == 1
+
+
+@pytest.mark.django_db
+def test_is_not_transient_400_client_error_no_retry(stock_source):
+    """genai_errors.ClientError con código 400 no es transitorio: sin reintentos."""
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+        ticker_stats={"AAPL": {"created": 1, "updated": 0, "errors": 0}},
+    )
+
+    error_400 = genai_errors.ClientError(
+        400, {"error": {"code": 400, "message": "Bad Request", "status": "INVALID_ARGUMENT"}}
+    )
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=error_400),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary.startswith("[Resumen automático sin LLM]")
+    mocked_sleep.assert_not_called()

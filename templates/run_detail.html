@@ -26,6 +26,14 @@
     <div class="kpi-value">{{ run.rows_ingested }}</div>
   </div>
   <div class="kpi">
+    <div class="kpi-label">Nuevas</div>
+    <div class="kpi-value">{% if run.rows_created == 0 and run.rows_updated == 0 and run.rows_ingested > 0 %}—{% else %}{{ run.rows_created }}{% endif %}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Actualizadas</div>
+    <div class="kpi-value">{% if run.rows_created == 0 and run.rows_updated == 0 and run.rows_ingested > 0 %}—{% else %}{{ run.rows_updated }}{% endif %}</div>
+  </div>
+  <div class="kpi">
     <div class="kpi-label">Tickers OK</div>
     <div class="kpi-value">{{ report.tickers_ingested|length }} de {{ tickers_total_count }}</div>
   </div>

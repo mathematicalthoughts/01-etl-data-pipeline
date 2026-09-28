@@ -7,7 +7,8 @@ name: Scheduled Ingestion
 # IMPORTANTE sobre el cron: el `schedule` de GitHub Actions siempre corre en
 # UTC fijo, nunca ajusta por horario de verano (DST). La intención es
 # aproximar las 9, 13 y 17hs America/New_York que usa el PeriodicTask de
-# Celery Beat (`python manage.py setup_schedule`).
+# Celery Beat (`python manage.py setup_schedule`). Corremos en minuto 17 para
+# evitar colisiones con otras tareas que corren al minuto 0.
 #   - En horario de verano en EE.UU. (EDT, UTC-4, aprox. marzo-noviembre):
 #     9/13/17hs ET = 13/17/21hs UTC → coincide exacto con el cron de abajo.
 #   - Fuera de horario de verano (EST, UTC-5, aprox. noviembre-marzo):
@@ -16,7 +17,7 @@ name: Scheduled Ingestion
 # apto para un caso donde el horario exacto de mercado importe (ver README).
 on:
   schedule:
-    - cron: "0 13,17,21 * * 1-5"
+    - cron: "17 13,17,21 * * 1-5"
   workflow_dispatch:
 
 jobs:
