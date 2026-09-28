@@ -7,6 +7,7 @@ import yfinance as yf
 from django.conf import settings
 from django.utils import timezone
 from google import genai
+from google.genai import errors as genai_errors
 
 from .models import DataSource, IngestionRun, PriceRecord
 
@@ -36,6 +37,40 @@ TRANSIENT_NETWORK_ERRORS = (
 )
 MAX_HISTORY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = (1, 2)
+
+# Gemini summary retry constants
+GEMINI_TRANSIENT_HTTP_CODES = {429, 503}
+MAX_SUMMARY_ATTEMPTS = 3
+SUMMARY_BACKOFF_SECONDS = (2, 4)
+
+
+def _is_transient_gemini_error(exc: Exception) -> bool:
+    """Returns True for Gemini errors that are worth retrying (5xx or 429)."""
+    if isinstance(exc, genai_errors.ServerError):
+        return True  # all 5xx including 503
+    if isinstance(exc, genai_errors.ClientError) and exc.code == 429:
+        return True  # rate limit
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    return False
+
+
+def _build_fallback_summary(run: IngestionRun) -> str:
+    """Builds a deterministic fallback summary (no LLM) from run.quality_report()."""
+    report = run.quality_report()
+    source = report["source"]
+    status = report["status"]
+    rows_ingested = report["rows_ingested"]
+    tickers_ingested_str = ", ".join(report["tickers_ingested"]) or "ninguno"
+    tickers_failed_str = ", ".join(report["tickers_failed"]) or "ninguno"
+    success_rate = report["success_rate"]
+    return (
+        f"[Resumen automático sin LLM] Fuente: {source}, estado: {status}, "
+        f"{rows_ingested} filas ingeridas. "
+        f"Tickers OK: {tickers_ingested_str}. "
+        f"Tickers fallidos: {tickers_failed_str}. "
+        f"Tasa de éxito: {success_rate}%."
+    )
 
 
 def _fetch_ticker_history(ticker: str, period: str):
@@ -212,17 +247,60 @@ def generate_run_summary(run: IngestionRun) -> str:
     Genera (vía Gemini) y persiste en `run.summary` un resumen en lenguaje
     natural de 2-3 líneas de un IngestionRun: tickers ingeridos, tickers
     fallidos y por qué, y la tasa de éxito de `run.quality_report()`.
+
+    Si Gemini falla con un error transitorio (5xx, 429, TimeoutError,
+    ConnectionError), reintenta hasta MAX_SUMMARY_ATTEMPTS veces con backoff
+    SUMMARY_BACKOFF_SECONDS. Para errores no transitorios (ej. 400) no
+    desperdicia reintentos y genera directamente el fallback.
+
+    Nunca re-raise: si todos los reintentos se agotan o el error no es
+    transitorio, persiste un resumen de fallback con prefijo
+    '[Resumen automático sin LLM]'.
     """
     report = run.quality_report()
     prompt = _build_summary_prompt(run, report)
 
-    client = genai.Client(api_key=settings.GEMINI_API_KEY)
-    response = client.models.generate_content(
-        model=settings.GEMINI_MODEL,
-        contents=prompt,
-    )
+    last_exc: Exception | None = None
 
-    summary = (response.text or "").strip()
-    run.summary = summary
+    for attempt in range(1, MAX_SUMMARY_ATTEMPTS + 1):
+        try:
+            client = genai.Client(api_key=settings.GEMINI_API_KEY)
+            response = client.models.generate_content(
+                model=settings.GEMINI_MODEL,
+                contents=prompt,
+            )
+            summary = (response.text or "").strip()
+            run.summary = summary
+            run.save(update_fields=["summary"])
+            return summary
+        except Exception as exc:
+            last_exc = exc
+            if not _is_transient_gemini_error(exc):
+                # Non-transient error: no point retrying, go straight to fallback
+                logger.error(
+                    "resumen de Gemini: error no transitorio para IngestionRun #%s: %s",
+                    run.id,
+                    exc,
+                )
+                break
+            if attempt < MAX_SUMMARY_ATTEMPTS:
+                logger.warning(
+                    "resumen de Gemini: error transitorio para IngestionRun #%s (intento %d/%d): %s — reintentando.",
+                    run.id,
+                    attempt,
+                    MAX_SUMMARY_ATTEMPTS,
+                    exc,
+                )
+                time.sleep(SUMMARY_BACKOFF_SECONDS[attempt - 1])
+            else:
+                logger.error(
+                    "resumen de Gemini: reintentos agotados para IngestionRun #%s: %s",
+                    run.id,
+                    exc,
+                )
+
+    # All retries exhausted or non-transient error: persist deterministic fallback
+    fallback = _build_fallback_summary(run)
+    run.summary = fallback
     run.save(update_fields=["summary"])
-    return summary
+    return fallback

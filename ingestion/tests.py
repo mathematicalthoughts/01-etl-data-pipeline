@@ -7,6 +7,7 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.utils import timezone
+from google.genai import errors as genai_errors
 
 from ingestion.models import DataSource, IngestionRun, PriceRecord
 from ingestion.services import generate_run_summary, reap_stale_running_runs, run_ingestion
@@ -372,7 +373,7 @@ def test_run_ingestion_survives_gemini_failure_and_logs_it(stock_source, caplog)
 
     assert run.status == IngestionRun.Status.SUCCESS
     assert run.rows_ingested == 1
-    assert run.summary == ""
+    assert run.summary.startswith("[Resumen automático sin LLM]")
     assert "resumen de Gemini" in caplog.text
     assert str(run.id) in caplog.text
 
@@ -513,3 +514,178 @@ def test_reap_stale_running_runs_leaves_recent_running_run_untouched(stock_sourc
     assert recent_run.status == IngestionRun.Status.RUNNING
     assert recent_run.finished_at is None
     assert recent_run.errors_json == []
+
+
+# --- generate_run_summary: retry con backoff para errores Gemini transitorios ---
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_retries_transient_503_then_succeeds(stock_source):
+    """
+    (a) Gemini falla 2 veces con ServerError(503) luego tiene éxito en el 3er
+    intento: el summary final debe ser el texto del LLM, no el fallback.
+    """
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+    )
+
+    server_error = genai_errors.ServerError(
+        503, {"error": {"code": 503, "message": "Service Unavailable", "status": "UNAVAILABLE"}}
+    )
+    fake_response = MagicMock()
+    fake_response.text = "Resumen exitoso tras reintentos."
+    fake_client_success = MagicMock()
+    fake_client_success.models.generate_content.return_value = fake_response
+
+    # genai.Client is called once per attempt; first 2 raise, 3rd returns good client
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=[server_error, server_error, fake_client_success]),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary == "Resumen exitoso tras reintentos."
+    assert not summary.startswith("[Resumen automático sin LLM]")
+    run.refresh_from_db()
+    assert run.summary == "Resumen exitoso tras reintentos."
+    # 2 sleeps between attempts 1->2 and 2->3
+    assert mocked_sleep.call_count == 2
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_falls_back_after_all_503_retries_exhausted(stock_source):
+    """
+    (b) Gemini falla siempre con ServerError(503): tras MAX_SUMMARY_ATTEMPTS
+    intentos el summary debe empezar con '[Resumen automático sin LLM]'.
+    """
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=2,
+    )
+
+    server_error = genai_errors.ServerError(
+        503, {"error": {"code": 503, "message": "Service Unavailable", "status": "UNAVAILABLE"}}
+    )
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=server_error),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary.startswith("[Resumen automático sin LLM]")
+    run.refresh_from_db()
+    assert run.summary.startswith("[Resumen automático sin LLM]")
+    # 2 sleeps between the 3 attempts
+    assert mocked_sleep.call_count == 2
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_falls_back_immediately_on_non_transient_400(stock_source):
+    """
+    (c) Gemini devuelve un 400 ClientError (no transitorio): no debe reintentar
+    (1 sola llamada), y el summary debe empezar con '[Resumen automático sin LLM]'.
+    """
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.FAILED,
+        rows_ingested=0,
+    )
+
+    client_400_error = genai_errors.ClientError(
+        400, {"error": {"code": 400, "message": "Bad Request", "status": "INVALID_ARGUMENT"}}
+    )
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=client_400_error) as mocked_cls,
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary.startswith("[Resumen automático sin LLM]")
+    run.refresh_from_db()
+    assert run.summary.startswith("[Resumen automático sin LLM]")
+    # No retries: genai.Client called exactly once
+    assert mocked_cls.call_count == 1
+    mocked_sleep.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_backfill_run_summaries_updates_empty_summaries_and_is_idempotent(stock_source, capsys):
+    """
+    (d) El comando backfill_run_summaries actualiza exactamente los runs con
+    summary vacío y estado SUCCESS/PARTIAL. Re-ejecutar no cambia nada.
+    """
+    run1 = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+        summary="",
+    )
+    run2 = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.PARTIAL,
+        rows_ingested=0,
+        summary="",
+    )
+    run3 = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=3,
+        summary="Resumen ya existente.",
+    )
+
+    call_command("backfill_run_summaries")
+
+    captured = capsys.readouterr()
+    assert "2" in captured.out
+
+    run1.refresh_from_db()
+    run2.refresh_from_db()
+    run3.refresh_from_db()
+
+    assert run1.summary.startswith("[Resumen automático sin LLM]")
+    assert run2.summary.startswith("[Resumen automático sin LLM]")
+    assert run3.summary == "Resumen ya existente."
+
+    # Idempotency: re-running should update 0 runs
+    call_command("backfill_run_summaries")
+    captured2 = capsys.readouterr()
+    assert "0" in captured2.out
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_retries_transient_429_then_succeeds(stock_source):
+    """
+    429 ClientError (rate limit) es transitorio: 2 fallos seguidos de éxito
+    → el summary final debe ser el texto del LLM, no el fallback.
+    """
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+    )
+
+    rate_limit_error = genai_errors.ClientError(
+        429, {"error": {"code": 429, "message": "Too Many Requests", "status": "RESOURCE_EXHAUSTED"}}
+    )
+
+    fake_response = MagicMock()
+    fake_response.text = "Resumen exitoso tras rate limit."
+    fake_client_success = MagicMock()
+    fake_client_success.models.generate_content.return_value = fake_response
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=[rate_limit_error, rate_limit_error, fake_client_success]),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary == "Resumen exitoso tras rate limit."
+    assert not summary.startswith("[Resumen automático sin LLM]")
+    run.refresh_from_db()
+    assert run.summary == "Resumen exitoso tras rate limit."
+    assert mocked_sleep.call_count == 2
