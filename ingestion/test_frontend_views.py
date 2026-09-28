@@ -175,6 +175,84 @@ def test_run_detail_404_for_missing_run(client):
 
 
 @pytest.mark.django_db
+def test_runs_list_shows_dash_for_legacy_run(client, stock_source):
+    """Legacy run (rows_ingested>0 pero rows_created==rows_updated==0) muestra '—'."""
+    IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=168,
+        rows_created=0,
+        rows_updated=0,
+    )
+
+    response = client.get(reverse("runs_list"))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "—" in content
+
+
+@pytest.mark.django_db
+def test_runs_list_shows_numbers_for_new_run(client, stock_source):
+    """Run nuevo con rows_created/updated definidos muestra los números reales."""
+    IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=5,
+        rows_created=3,
+        rows_updated=2,
+    )
+
+    response = client.get(reverse("runs_list"))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "3 / 2" in content
+
+
+@pytest.mark.django_db
+def test_run_detail_shows_dash_for_legacy_run(client, stock_source):
+    """run_detail muestra '—' en Nuevas y Actualizadas para runs legacy."""
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=168,
+        rows_created=0,
+        rows_updated=0,
+    )
+
+    response = client.get(reverse("run_detail", args=[run.pk]))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    # Both KPI cards should show "—" (the dash may appear multiple times)
+    assert content.count("—") >= 2
+
+
+@pytest.mark.django_db
+def test_run_detail_shows_numbers_for_new_run(client, stock_source):
+    """run_detail muestra números reales de Nuevas/Actualizadas para runs nuevos."""
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=5,
+        rows_created=3,
+        rows_updated=2,
+    )
+
+    response = client.get(reverse("run_detail", args=[run.pk]))
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    # The KPI values appear individually in separate divs
+    assert ">3<" in content
+    assert ">2<" in content
+
+
+# --- prices explorer -------------------------------------------------------
+
+
+@pytest.mark.django_db
 def test_prices_explorer_returns_200_with_no_data(client):
     response = client.get(reverse("prices_explorer"))
     assert response.status_code == 200

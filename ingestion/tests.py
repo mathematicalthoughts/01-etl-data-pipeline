@@ -319,28 +319,36 @@ def test_generate_run_summary_saves_text_from_gemini(stock_source):
 
 @pytest.mark.django_db
 def test_generate_run_summary_strips_whitespace_only_text(stock_source):
+    # Whitespace-only response counts as empty → retries exhausted → fallback
     run = IngestionRun.objects.create(source=stock_source, status=IngestionRun.Status.SUCCESS)
     fake_client = make_fake_gemini_client("   \n  ")
 
-    with patch(GEMINI_PATCH_TARGET, return_value=fake_client):
+    with (
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+        patch("ingestion.services.time.sleep"),
+    ):
         summary = generate_run_summary(run)
 
-    assert summary == ""
+    assert summary.startswith("[Resumen automático sin LLM]")
     run.refresh_from_db()
-    assert run.summary == ""
+    assert run.summary.startswith("[Resumen automático sin LLM]")
 
 
 @pytest.mark.django_db
 def test_generate_run_summary_handles_none_text(stock_source):
+    # None response counts as empty → retries exhausted → fallback
     run = IngestionRun.objects.create(source=stock_source, status=IngestionRun.Status.SUCCESS)
     fake_client = make_fake_gemini_client(None)
 
-    with patch(GEMINI_PATCH_TARGET, return_value=fake_client):
+    with (
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+        patch("ingestion.services.time.sleep"),
+    ):
         summary = generate_run_summary(run)
 
-    assert summary == ""
+    assert summary.startswith("[Resumen automático sin LLM]")
     run.refresh_from_db()
-    assert run.summary == ""
+    assert run.summary.startswith("[Resumen automático sin LLM]")
 
 
 @pytest.mark.django_db

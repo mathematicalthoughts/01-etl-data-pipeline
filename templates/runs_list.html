@@ -26,7 +26,7 @@
         <td class="name"><a href="{% url 'source_detail' run.source.pk %}">{{ run.source.name }}</a></td>
         <td>{% include "partials/_status_badge.html" with status=run.status %}</td>
         <td class="mono">{{ run.rows_ingested }}</td>
-        <td class="mono">{{ run.rows_created }} / {{ run.rows_updated }}</td>
+        <td class="mono">{% if run.rows_created == 0 and run.rows_updated == 0 and run.rows_ingested > 0 %}—{% else %}{{ run.rows_created }} / {{ run.rows_updated }}{% endif %}</td>
         <td{% if run.first_error %} class="err"{% endif %}>{{ run.first_error|default:"—" }}</td>
         <td>hace {{ run.created_at|timesince }}</td>
         <td class="mono">
