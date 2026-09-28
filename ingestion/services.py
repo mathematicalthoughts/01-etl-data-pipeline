@@ -45,11 +45,9 @@ SUMMARY_BACKOFF_SECONDS = (2, 4)
 
 
 def _is_transient_gemini_error(exc: Exception) -> bool:
-    """Returns True for Gemini errors that are worth retrying (5xx or 429)."""
-    if isinstance(exc, genai_errors.ServerError):
-        return True  # all 5xx including 503
-    if isinstance(exc, genai_errors.ClientError) and exc.code == 429:
-        return True  # rate limit
+    """Returns True for Gemini errors worth retrying (codes in GEMINI_TRANSIENT_HTTP_CODES or network)."""
+    if isinstance(exc, genai_errors.APIError) and exc.code in GEMINI_TRANSIENT_HTTP_CODES:
+        return True  # 503 service unavailable or 429 rate limit
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return True
     return False
@@ -268,8 +266,6 @@ def generate_run_summary(run: IngestionRun) -> str:
     report = run.quality_report()
     prompt = _build_summary_prompt(run, report)
 
-    last_exc: Exception | None = None
-
     for attempt in range(1, MAX_SUMMARY_ATTEMPTS + 1):
         try:
             client = genai.Client(api_key=settings.GEMINI_API_KEY)
@@ -282,7 +278,6 @@ def generate_run_summary(run: IngestionRun) -> str:
             run.save(update_fields=["summary"])
             return summary
         except Exception as exc:
-            last_exc = exc
             if not _is_transient_gemini_error(exc):
                 # Non-transient error: no point retrying, go straight to fallback
                 logger.error(
