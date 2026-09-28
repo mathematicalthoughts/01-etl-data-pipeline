@@ -2,6 +2,7 @@ import logging
 import time
 from datetime import timedelta
 
+import httpx
 import requests
 import yfinance as yf
 from django.conf import settings
@@ -39,16 +40,17 @@ MAX_HISTORY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = (1, 2)
 
 # Gemini summary retry constants
-GEMINI_TRANSIENT_HTTP_CODES = {429, 503}
 MAX_SUMMARY_ATTEMPTS = 3
 SUMMARY_BACKOFF_SECONDS = (2, 4)
 
 
 def _is_transient_gemini_error(exc: Exception) -> bool:
-    """Returns True for Gemini errors worth retrying (codes in GEMINI_TRANSIENT_HTTP_CODES or network)."""
-    if isinstance(exc, genai_errors.APIError) and exc.code in GEMINI_TRANSIENT_HTTP_CODES:
-        return True  # 503 service unavailable or 429 rate limit
-    if isinstance(exc, (TimeoutError, ConnectionError)):
+    """Returns True for Gemini errors worth retrying (5xx, 429, or transport failures)."""
+    if isinstance(exc, genai_errors.ServerError):  # any 5xx
+        return True
+    if isinstance(exc, genai_errors.APIError) and exc.code == 429:  # rate limit
+        return True
+    if isinstance(exc, httpx.TransportError):  # covers TimeoutException, ConnectError, etc.
         return True
     return False
 
@@ -248,11 +250,11 @@ def _build_summary_prompt(run: IngestionRun, report: dict) -> str:
     )
 
     return (
-        "Sos un analista de datos. Resumí en 2 o 3 líneas, en español y en "
+        "Eres un analista de datos. Resume en 2 o 3 líneas, en español y en "
         "lenguaje natural, el resultado de esta corrida de ingesta de precios "
-        "de mercado para un reporte de calidad de datos. Mencioná cuántos "
+        "de mercado para un reporte de calidad de datos. Menciona cuántos "
         "tickers se ingirieron, cuáles fallaron y por qué, y la tasa de éxito. "
-        "No repitas los datos en formato de lista, redactalo como prosa.\n\n"
+        "No repitas los datos en formato de lista, redáctalo como prosa.\n\n"
         f"- Fuente: {run.source.name}\n"
         f"- Estado del run: {run.status}\n"
         f"- Filas ingeridas: {run.rows_ingested}\n"
@@ -289,6 +291,20 @@ def generate_run_summary(run: IngestionRun) -> str:
                 contents=prompt,
             )
             summary = (response.text or "").strip()
+            if not summary:
+                # Empty response (blocked or no candidates): treat as transient and retry
+                if attempt < MAX_SUMMARY_ATTEMPTS:
+                    logger.warning(
+                        "resumen de Gemini: respuesta vacía para IngestionRun #%s (intento %d/%d) — reintentando.",
+                        run.id, attempt, MAX_SUMMARY_ATTEMPTS,
+                    )
+                    time.sleep(SUMMARY_BACKOFF_SECONDS[attempt - 1])
+                else:
+                    logger.error(
+                        "resumen de Gemini: respuesta vacía persistente para IngestionRun #%s — usando fallback.",
+                        run.id,
+                    )
+                continue
             run.summary = summary
             run.save(update_fields=["summary"])
             return summary

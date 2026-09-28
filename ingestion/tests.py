@@ -2,6 +2,7 @@ import logging
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pandas as pd
 import pytest
 from django.core.management import call_command
@@ -916,3 +917,112 @@ def test_fallback_summary_legacy_run_uses_generic_message(db):
     assert summary.startswith("[Resumen automático sin LLM]")
     assert "Detalle por instrumento no disponible" in summary
     assert "Tickers OK" not in summary
+
+
+# --- clasificación de errores transitorios y respuesta vacía -----------------
+
+
+@pytest.mark.django_db
+def test_generate_run_summary_empty_text_falls_back(stock_source):
+    """Gemini devuelve text=None en todos los intentos → fallback determinístico."""
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+        ticker_stats={"AAPL": {"created": 1, "updated": 0, "errors": 0}},
+    )
+
+    empty_response = MagicMock()
+    empty_response.text = None
+    fake_client_empty = MagicMock()
+    fake_client_empty.models.generate_content.return_value = empty_response
+
+    with (
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client_empty),
+        patch("ingestion.services.time.sleep"),
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary.startswith("[Resumen automático sin LLM]")
+    run.refresh_from_db()
+    assert run.summary.startswith("[Resumen automático sin LLM]")
+
+
+@pytest.mark.django_db
+def test_is_transient_server_error_retried(stock_source):
+    """genai_errors.ServerError (cualquier 5xx) es transitorio y dispara reintentos."""
+    from google.genai import errors as genai_errors_local
+
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+        ticker_stats={"AAPL": {"created": 1, "updated": 0, "errors": 0}},
+    )
+
+    server_error = genai_errors_local.ServerError(
+        503, {"error": {"code": 503, "message": "Service Unavailable", "status": "UNAVAILABLE"}}
+    )
+    fake_response = MagicMock()
+    fake_response.text = "Resumen tras 503."
+    fake_client_ok = MagicMock()
+    fake_client_ok.models.generate_content.return_value = fake_response
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=[server_error, fake_client_ok]),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary == "Resumen tras 503."
+    assert mocked_sleep.call_count == 1
+
+
+@pytest.mark.django_db
+def test_is_transient_httpx_transport_error_retried(stock_source):
+    """httpx.TransportError (incluye TimeoutException) es transitorio y dispara reintentos."""
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+        ticker_stats={"AAPL": {"created": 1, "updated": 0, "errors": 0}},
+    )
+
+    timeout_error = httpx.TimeoutException("timed out")
+    fake_response = MagicMock()
+    fake_response.text = "Resumen tras timeout."
+    fake_client_ok = MagicMock()
+    fake_client_ok.models.generate_content.return_value = fake_response
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=[timeout_error, fake_client_ok]),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary == "Resumen tras timeout."
+    assert mocked_sleep.call_count == 1
+
+
+@pytest.mark.django_db
+def test_is_not_transient_400_client_error_no_retry(stock_source):
+    """genai_errors.ClientError con código 400 no es transitorio: sin reintentos."""
+    run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=1,
+        ticker_stats={"AAPL": {"created": 1, "updated": 0, "errors": 0}},
+    )
+
+    error_400 = genai_errors.ClientError(
+        400, {"error": {"code": 400, "message": "Bad Request", "status": "INVALID_ARGUMENT"}}
+    )
+
+    with (
+        patch(GEMINI_PATCH_TARGET, side_effect=error_400),
+        patch("ingestion.services.time.sleep") as mocked_sleep,
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary.startswith("[Resumen automático sin LLM]")
+    mocked_sleep.assert_not_called()
