@@ -799,3 +799,120 @@ def test_rows_ingested_equals_created_plus_updated(stock_source):
     assert second_run.rows_ingested == second_run.rows_created + second_run.rows_updated
     assert second_run.rows_created == 1   # MSFT date is new
     assert second_run.rows_updated == 1   # AAPL date already existed
+
+
+# --- ticker_stats / quality_report() estabilidad ----------------------------
+
+
+@pytest.fixture
+def two_ticker_source(db):
+    return DataSource.objects.create(
+        name="multi-ticker",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": ["AAA", "BBB"], "period": "5d"},
+        active=True,
+    )
+
+
+@pytest.mark.django_db
+def test_quality_report_stable_after_second_run(two_ticker_source):
+    """
+    La primera corrida guarda ticker_stats propio. La segunda corrida reasigna
+    los PriceRecord a sí misma, pero quality_report() de la primera sigue
+    listando sus tickers desde ticker_stats (no desde price_records).
+    """
+    fake_client = make_fake_gemini_client()
+    history = make_history_df(
+        [{"date": date(2026, 1, 2), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 100}]
+    )
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAA": history, "BBB": history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        first_run = run_ingestion(two_ticker_source)
+
+    with (
+        patch(PATCH_TARGET, side_effect=mock_ticker_returning({"AAA": history, "BBB": history})),
+        patch(GEMINI_PATCH_TARGET, return_value=fake_client),
+    ):
+        run_ingestion(two_ticker_source)
+
+    # After second run, first run's quality_report must still list its tickers
+    first_run.refresh_from_db()
+    report = first_run.quality_report()
+    assert set(report["tickers_ingested"]) == {"AAA", "BBB"}
+    assert report["tickers_failed"] == []
+    assert "legacy" not in report
+
+
+@pytest.mark.django_db
+def test_quality_report_mixed_ticker_goes_to_ingested(db):
+    """
+    Un ticker con filas exitosas Y errores en algunas filas se clasifica como
+    ingerido (no fallido) porque created+updated > 0.
+    """
+    source = DataSource.objects.create(
+        name="src-mixto",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": ["MIX"], "period": "5d"},
+        active=True,
+    )
+    run = IngestionRun.objects.create(
+        source=source,
+        status=IngestionRun.Status.PARTIAL,
+        rows_ingested=2,
+        rows_created=2,
+        rows_updated=0,
+        ticker_stats={"MIX": {"created": 2, "updated": 0, "errors": 1}},
+        errors_json=[{"ticker": "MIX", "date": "2026-01-03", "error": "volume NaN"}],
+    )
+
+    report = run.quality_report()
+    assert "MIX" in report["tickers_ingested"]
+    assert "MIX" not in report["tickers_failed"]
+    assert report["success_rate"] == 100.0
+
+
+@pytest.mark.django_db
+def test_quality_report_legacy_run_returns_legacy_flag(db):
+    """Corrida sin ticker_stats (legacy) marca 'legacy': True en el reporte."""
+    source = DataSource.objects.create(
+        name="src-legacy",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": ["OLD"], "period": "5d"},
+        active=True,
+    )
+    run = IngestionRun.objects.create(
+        source=source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=10,
+        ticker_stats={},  # empty == legacy
+    )
+
+    report = run.quality_report()
+    assert report.get("legacy") is True
+
+
+@pytest.mark.django_db
+def test_fallback_summary_legacy_run_uses_generic_message(db):
+    """Corrida legacy → fallback con 'Detalle por instrumento no disponible'."""
+    from ingestion.services import _build_fallback_summary
+
+    source = DataSource.objects.create(
+        name="src-legacy2",
+        type=DataSource.SourceType.STOCK_PRICE,
+        config_json={"tickers": ["OLD"], "period": "5d"},
+        active=True,
+    )
+    run = IngestionRun.objects.create(
+        source=source,
+        status=IngestionRun.Status.SUCCESS,
+        rows_ingested=168,
+        ticker_stats={},
+    )
+
+    summary = _build_fallback_summary(run)
+    assert summary.startswith("[Resumen automático sin LLM]")
+    assert "Detalle por instrumento no disponible" in summary
+    assert "Tickers OK" not in summary

@@ -59,6 +59,12 @@ def _build_fallback_summary(run: IngestionRun) -> str:
     source = report["source"]
     status = report["status"]
     rows_ingested = report["rows_ingested"]
+    if report.get("legacy"):
+        return (
+            f"[Resumen automático sin LLM] Fuente: {source}, estado: {status}, "
+            f"{rows_ingested} filas procesadas. "
+            f"Detalle por instrumento no disponible (corrida anterior al registro por ticker)."
+        )
     tickers_ingested_str = ", ".join(report["tickers_ingested"]) or "ninguno"
     tickers_failed_str = ", ".join(report["tickers_failed"]) or "ninguno"
     success_rate = report["success_rate"]
@@ -123,18 +129,23 @@ def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun
     rows_created_count = 0
     rows_updated_count = 0
     errors = []
+    ticker_stats: dict = {}
 
     for ticker in tickers:
+        ticker_stats[ticker] = {"created": 0, "updated": 0, "errors": 0}
+
         try:
             history = _fetch_ticker_history(ticker, resolved_period)
         except Exception as exc:
             errors.append({"ticker": ticker, "error": str(exc)})
+            ticker_stats[ticker]["errors"] += 1
             continue
 
         if history is None or history.empty:
             errors.append(
                 {"ticker": ticker, "error": "No se recibieron datos (respuesta vacía)."}
             )
+            ticker_stats[ticker]["errors"] += 1
             continue
 
         for index, row in history.iterrows():
@@ -154,18 +165,22 @@ def run_ingestion(source: DataSource, period: str | None = None) -> IngestionRun
                 )
                 if created_flag:
                     rows_created_count += 1
+                    ticker_stats[ticker]["created"] += 1
                 else:
                     rows_updated_count += 1
+                    ticker_stats[ticker]["updated"] += 1
                 rows_ingested += 1
             except Exception as exc:
                 errors.append(
                     {"ticker": ticker, "date": str(index.date()), "error": str(exc)}
                 )
+                ticker_stats[ticker]["errors"] += 1
 
     run.finished_at = timezone.now()
     run.rows_ingested = rows_ingested
     run.rows_created = rows_created_count
     run.rows_updated = rows_updated_count
+    run.ticker_stats = ticker_stats
     run.errors_json = errors
 
     if errors and rows_ingested == 0:
