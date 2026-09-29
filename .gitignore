@@ -17,3 +17,4 @@ htmlcov/
 .idea/
 .vscode/
 node_modules/
+graphify-out/
