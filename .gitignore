@@ -18,3 +18,4 @@ htmlcov/
 .vscode/
 node_modules/
 graphify-out/
+docs/superpowers/

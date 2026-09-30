@@ -80,7 +80,7 @@
     <div class="ai-panel-body">
       <div class="ai-label">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.7L19 10l-5.1 1.3L12 17l-1.9-5.7L5 10l5.1-1.3z"></path></svg>
-        Gemini{% if gemini_model %} · {{ gemini_model }}{% endif %}
+        {{ summary_label }}
       </div>
       {% if run.summary %}
       <div class="ai-text">&ldquo;{{ run.summary }}&rdquo;</div>

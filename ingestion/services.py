@@ -44,7 +44,8 @@ RETRY_BACKOFF_SECONDS = (1, 2)
 # backoff, so a degraded provider chain cannot hold an ingestion indefinitely.
 MAX_SUMMARY_ATTEMPTS = 2
 SUMMARY_BACKOFF_SECONDS = 2
-SUMMARY_WAIT_BUDGET_SECONDS = 20
+SUMMARY_WAIT_BUDGET_SECONDS = 30
+SUMMARY_CALL_TIMEOUT_SECONDS = 6
 
 
 class _EmptySummaryError(Exception):
@@ -57,7 +58,7 @@ class _ProviderDeadlineError(Exception):
 
 def _is_transient_summary_error(exc: Exception) -> bool:
     """Return whether a provider failure is safe and useful to retry."""
-    if isinstance(exc, _EmptySummaryError):
+    if isinstance(exc, (_EmptySummaryError, _ProviderDeadlineError)):
         return True
     if isinstance(exc, genai_errors.ServerError):  # any 5xx
         return True
@@ -90,6 +91,7 @@ def _call_groq(prompt: str, model: str, timeout_seconds: float) -> str:
         json={
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 400,
         },
         timeout=timeout_seconds,
     )
@@ -118,7 +120,8 @@ def _try_summary_provider(run, source: str, call_provider, deadline: float):
         if remaining <= 0:
             return None
         try:
-            summary = _call_before_deadline(call_provider, remaining)
+            call_timeout = min(remaining, SUMMARY_CALL_TIMEOUT_SECONDS)
+            summary = _call_before_deadline(call_provider, call_timeout)
             if deadline - time.monotonic() <= 0:
                 raise _ProviderDeadlineError("respuesta recibida fuera del presupuesto")
             if not summary:
@@ -380,7 +383,7 @@ def generate_run_summary(run: IngestionRun) -> str:
     """
     Evalúa proveedores configurados en orden y persiste texto + procedencia.
     Cada proveedor tiene hasta dos intentos para errores transitorios, todos
-    compartiendo un presupuesto monotónico máximo de 20 segundos.
+    compartiendo un presupuesto monotónico máximo de 30 segundos.
     """
     report = run.quality_report()
     prompt = _build_summary_prompt(run, report)

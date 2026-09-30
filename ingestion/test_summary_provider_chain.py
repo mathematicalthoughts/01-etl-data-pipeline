@@ -9,6 +9,7 @@ from django.apps import apps
 from django.test import override_settings
 from google.genai import errors as genai_errors
 
+from ingestion import services as summary_services
 from ingestion.models import DataSource, IngestionRun
 from ingestion.services import generate_run_summary
 
@@ -128,6 +129,62 @@ def test_both_gemini_models_exhaust_503_then_groq_succeeds(run):
     assert post.call_count == 1
     assert post.call_args.args[0] == "https://api.groq.com/openai/v1/chat/completions"
     assert post.call_args.kwargs["json"]["model"] == "llama-test"
+    assert post.call_args.kwargs["json"]["max_tokens"] == 400
+    run.refresh_from_db()
+    assert run.summary_source == "groq:llama-test"
+
+
+@pytest.mark.django_db
+@override_settings(
+    GEMINI_API_KEY="gemini-key",
+    GEMINI_MODEL="gemini-primary",
+    GEMINI_FALLBACK_MODEL="",
+    GROQ_API_KEY="groq-key",
+    GROQ_MODEL="llama-test",
+    GROQ_BASE_URL="https://api.groq.com/openai/v1",
+)
+def test_gemini_hangs_twice_then_groq_responds_within_budget(run):
+    class FakeClock:
+        def __init__(self):
+            self.now = 0.0
+            self.sleeps = []
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    clock = FakeClock()
+    call_timeouts = []
+
+    def simulate_deadline_then_call(provider, timeout):
+        call_timeouts.append(timeout)
+        if len(call_timeouts) <= 2:
+            clock.now += timeout
+            raise summary_services._ProviderDeadlineError("provider hung")
+        return provider(timeout)
+
+    with (
+        patch(
+            "ingestion.services._call_before_deadline",
+            side_effect=simulate_deadline_then_call,
+        ),
+        patch(
+            "ingestion.services.httpx.post",
+            return_value=groq_response("Resumen Groq"),
+        ) as post,
+        patch("ingestion.services.time.monotonic", side_effect=clock.monotonic),
+        patch("ingestion.services.time.sleep", side_effect=clock.sleep),
+    ):
+        assert generate_run_summary(run) == "Resumen Groq"
+
+    assert len(call_timeouts) == 3
+    assert all(0 < timeout <= 6 for timeout in call_timeouts)
+    assert clock.now <= 30
+    assert post.call_args.kwargs["timeout"] <= 6
+    assert post.call_args.kwargs["json"]["max_tokens"] == 400
     run.refresh_from_db()
     assert run.summary_source == "groq:llama-test"
 
@@ -210,7 +267,7 @@ def test_empty_groq_response_is_transient_and_retried(run):
     GROQ_API_KEY="groq-key",
     GROQ_MODEL="llama-test",
 )
-def test_total_wait_budget_never_exceeds_twenty_seconds(run):
+def test_total_wait_budget_never_exceeds_thirty_seconds(run):
     class FakeClock:
         def __init__(self):
             self.now = 0.0
@@ -229,24 +286,32 @@ def test_total_wait_budget_never_exceeds_twenty_seconds(run):
     )
     client = MagicMock()
 
-    def consume_budget(**kwargs):
-        clock.now += 19
+    def consume_gemini_call_budget(**kwargs):
+        clock.now += 6
         raise error
 
-    client.models.generate_content.side_effect = consume_budget
+    def consume_groq_call_budget(*args, timeout, **kwargs):
+        clock.now += timeout
+        raise httpx.ReadTimeout("Groq timed out")
+
+    client.models.generate_content.side_effect = consume_gemini_call_budget
 
     with (
-        patch("ingestion.services.genai.Client", return_value=client),
-        patch("ingestion.services.httpx.post") as post,
+        patch("ingestion.services.genai.Client", return_value=client) as gemini_client,
+        patch("ingestion.services.httpx.post", side_effect=consume_groq_call_budget) as post,
         patch("ingestion.services.time.monotonic", side_effect=clock.monotonic),
         patch("ingestion.services.time.sleep", side_effect=clock.sleep),
     ):
         summary = generate_run_summary(run)
 
     assert summary.startswith("[Resumen automático sin LLM]")
-    assert sum(clock.sleeps) <= 20
-    assert clock.now <= 20
-    post.assert_not_called()
+    assert sum(clock.sleeps) <= 30
+    assert clock.now <= 30
+    assert all(
+        call.kwargs["http_options"]["timeout"] <= 6000
+        for call in gemini_client.call_args_list
+    )
+    post.assert_called_once()
 
 
 @pytest.mark.django_db
@@ -259,7 +324,7 @@ def test_total_wait_budget_never_exceeds_twenty_seconds(run):
 )
 def test_success_arriving_after_deadline_is_rejected(run):
     clock = MagicMock()
-    clock.monotonic.side_effect = [0, 0, 0, 21, 21]
+    clock.monotonic.side_effect = [0, 0, 0, 31, 31]
     client = MagicMock()
     client.models.generate_content.return_value = gemini_response("Resumen tardío")
 

@@ -1,7 +1,6 @@
 import json
 from datetime import timedelta
 
-from django.conf import settings
 from django.db.models import Count, Sum
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
@@ -188,7 +187,7 @@ def run_detail(request, pk):
         "errors_display": [
             json.dumps(err, ensure_ascii=False) for err in (run.errors_json or [])
         ],
-        "gemini_model": settings.GEMINI_MODEL,
+        "summary_label": _summary_label(run.summary_source),
     }
     return render(request, "run_detail.html", context)
 

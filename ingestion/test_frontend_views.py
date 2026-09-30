@@ -227,6 +227,33 @@ def test_run_detail_returns_200_with_ticker_breakdown(client, partial_run):
 
 
 @pytest.mark.django_db
+def test_run_detail_labels_gemini_summary_from_summary_source(client, partial_run):
+    response = client.get(reverse("run_detail", args=[partial_run.pk]))
+
+    assert "Resumen IA - gemini/gemini-3.8-flash" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_run_detail_labels_groq_summary_from_summary_source(client, partial_run):
+    partial_run.summary_source = "groq:llama-3.3-70b-versatile"
+    partial_run.save(update_fields=["summary_source"])
+
+    response = client.get(reverse("run_detail", args=[partial_run.pk]))
+
+    assert "Resumen IA - groq/llama-3.3-70b-versatile" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_run_detail_labels_fallback_summary_from_summary_source(client, partial_run):
+    partial_run.summary_source = "fallback"
+    partial_run.save(update_fields=["summary_source"])
+
+    response = client.get(reverse("run_detail", args=[partial_run.pk]))
+
+    assert "Resumen automatico (sin IA)" in response.content.decode()
+
+
+@pytest.mark.django_db
 def test_run_detail_404_for_missing_run(client):
     response = client.get(reverse("run_detail", args=[999]))
     assert response.status_code == 404
