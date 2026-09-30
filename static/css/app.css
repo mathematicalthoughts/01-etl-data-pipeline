@@ -81,7 +81,7 @@ a:hover { color: oklch(80% 0.13 200); }
 .crumb .cur { color: var(--text-muted); }
 
 /* KPI cards */
-.kpi-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.kpi-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; }
 .kpi { background: var(--panel); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; }
 .kpi-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
 .kpi-value { font-family: var(--font-mono); font-size: 26px; font-weight: 600; color: var(--text); }

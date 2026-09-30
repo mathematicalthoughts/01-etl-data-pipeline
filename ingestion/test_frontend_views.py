@@ -35,6 +35,7 @@ def partial_run(stock_source):
         rows_ingested=1,
         errors_json=[{"ticker": "SCCO", "error": "symbol not found"}],
         summary="Se ingirió FCX correctamente; SCCO falló por símbolo no encontrado.",
+        summary_source="gemini:gemini-3.8-flash",
         started_at=timezone.now() - timedelta(seconds=2),
         finished_at=timezone.now(),
     )
@@ -73,9 +74,69 @@ def test_dashboard_shows_source_and_recent_run(client, stock_source, partial_run
 
 
 @pytest.mark.django_db
-def test_dashboard_shows_latest_gemini_summary(client, partial_run):
+def test_dashboard_labels_latest_llm_summary_with_provider_and_model(client, partial_run):
     response = client.get(reverse("dashboard"))
-    assert "falló por símbolo no encontrado" in response.content.decode()
+    content = response.content.decode()
+    assert "falló por símbolo no encontrado" in content
+    assert "Resumen IA - gemini/gemini-3.8-flash" in content
+
+
+@pytest.mark.django_db
+def test_dashboard_labels_fallback_summary_without_ai(client, partial_run):
+    partial_run.summary_source = "fallback"
+    partial_run.save(update_fields=["summary_source"])
+
+    response = client.get(reverse("dashboard"))
+
+    assert "Resumen automatico (sin IA)" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_dashboard_shows_ai_summary_percentage_for_last_30_days(client, stock_source):
+    for source in ["gemini:primary", "groq:llama", "fallback", ""]:
+        IngestionRun.objects.create(
+            source=stock_source,
+            status=IngestionRun.Status.SUCCESS,
+            summary="resumen" if source else "",
+            summary_source=source,
+        )
+    old_run = IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        summary="resumen antiguo",
+        summary_source="gemini:legacy",
+    )
+    IngestionRun.objects.filter(pk=old_run.pk).update(
+        created_at=timezone.now() - timedelta(days=31)
+    )
+
+    response = client.get(reverse("dashboard"))
+
+    assert response.context["ai_summary_rate_30d"] == 50.0
+    content = response.content.decode()
+    assert "Resumenes IA (30D)" in content
+    assert "50.0%" in content
+
+
+@pytest.mark.django_db
+def test_all_frontend_pages_use_copper_market_data_pipeline_brand(
+    client, stock_source, partial_run
+):
+    urls = [
+        reverse("dashboard"),
+        reverse("sources_list"),
+        reverse("source_detail", args=[stock_source.pk]),
+        reverse("runs_list"),
+        reverse("run_detail", args=[partial_run.pk]),
+        reverse("prices_explorer"),
+    ]
+
+    for url in urls:
+        content = client.get(url).content.decode()
+        assert "Copper Market Data Pipeline</title>" in content
+        assert "ETL PIPELINE" not in content
+        assert "ETL Pipeline" not in content
+        assert "Market &amp; Commodities" not in content
 
 
 # --- sources list --------------------------------------------------------

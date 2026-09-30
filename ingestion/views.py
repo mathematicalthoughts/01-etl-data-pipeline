@@ -57,6 +57,15 @@ def _sparkline_points(records, width=90, height=24):
     return " ".join(points)
 
 
+def _summary_label(summary_source):
+    if not summary_source or summary_source == "fallback":
+        return "Resumen automatico (sin IA)"
+    provider, separator, model = summary_source.partition(":")
+    if separator and model:
+        return f"Resumen IA - {provider}/{model}"
+    return "Resumen IA"
+
+
 def dashboard(request):
     sources = DataSource.objects.all()
 
@@ -68,6 +77,10 @@ def dashboard(request):
         round(success_runs_30d / total_runs_30d * 100, 1) if total_runs_30d else None
     )
     rows_30d = runs_30d.aggregate(total=Sum("rows_ingested"))["total"] or 0
+    ai_summary_runs_30d = runs_30d.exclude(summary_source__in=["", "fallback"]).count()
+    ai_summary_rate_30d = (
+        round(ai_summary_runs_30d / total_runs_30d * 100, 1) if total_runs_30d else None
+    )
     runs_today = IngestionRun.objects.filter(created_at__date=timezone.now().date()).count()
 
     source_rows = []
@@ -90,6 +103,9 @@ def dashboard(request):
     latest_summary_run = (
         IngestionRun.objects.exclude(summary="").order_by("-created_at").first()
     )
+    latest_summary_label = (
+        _summary_label(latest_summary_run.summary_source) if latest_summary_run else ""
+    )
 
     context = {
         "active_view": "dashboard",
@@ -98,9 +114,11 @@ def dashboard(request):
         "success_rate_30d": success_rate_30d,
         "runs_today": runs_today,
         "rows_30d": rows_30d,
+        "ai_summary_rate_30d": ai_summary_rate_30d,
         "source_rows": source_rows,
         "recent_runs": recent_runs,
         "latest_summary_run": latest_summary_run,
+        "latest_summary_label": latest_summary_label,
     }
     return render(request, "dashboard.html", context)
 
