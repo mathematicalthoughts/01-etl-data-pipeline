@@ -47,6 +47,14 @@ def groq_response(text, status_code=200):
     )
 
 
+def groq_error_response(status_code, body):
+    return httpx.Response(
+        status_code,
+        text=body,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+    )
+
+
 @pytest.mark.django_db
 @override_settings(
     GEMINI_API_KEY="gemini-key",
@@ -129,7 +137,10 @@ def test_both_gemini_models_exhaust_503_then_groq_succeeds(run):
     assert post.call_count == 1
     assert post.call_args.args[0] == "https://api.groq.com/openai/v1/chat/completions"
     assert post.call_args.kwargs["json"]["model"] == "llama-test"
-    assert post.call_args.kwargs["json"]["max_tokens"] == 400
+    assert post.call_args.kwargs["json"]["max_completion_tokens"] == 1024
+    assert post.call_args.kwargs["json"]["reasoning_effort"] == "low"
+    assert post.call_args.kwargs["json"]["include_reasoning"] is False
+    assert "max_tokens" not in post.call_args.kwargs["json"]
     run.refresh_from_db()
     assert run.summary_source == "groq:llama-test"
 
@@ -181,10 +192,13 @@ def test_gemini_hangs_twice_then_groq_responds_within_budget(run):
         assert generate_run_summary(run) == "Resumen Groq"
 
     assert len(call_timeouts) == 3
-    assert all(0 < timeout <= 6 for timeout in call_timeouts)
-    assert clock.now <= 30
-    assert post.call_args.kwargs["timeout"] <= 6
-    assert post.call_args.kwargs["json"]["max_tokens"] == 400
+    assert all(0 < timeout <= 15 for timeout in call_timeouts)
+    assert all(timeout >= 10 for timeout in call_timeouts[:2])
+    assert clock.now <= 60
+    assert post.call_args.kwargs["timeout"] <= 15
+    assert post.call_args.kwargs["json"]["max_completion_tokens"] == 1024
+    assert post.call_args.kwargs["json"]["reasoning_effort"] == "low"
+    assert post.call_args.kwargs["json"]["include_reasoning"] is False
     run.refresh_from_db()
     assert run.summary_source == "groq:llama-test"
 
@@ -240,6 +254,75 @@ def test_gemini_400_moves_to_groq_without_retry_or_sleep(run):
 
 @pytest.mark.django_db
 @override_settings(
+    GEMINI_API_KEY="gemini-key",
+    GEMINI_MODEL="gemini-primary",
+    GEMINI_FALLBACK_MODEL="",
+    GROQ_API_KEY="",
+    GROQ_MODEL="",
+)
+def test_gemini_timeout_is_never_below_ten_seconds(run):
+    client = MagicMock()
+    client.models.generate_content.return_value = gemini_response("Resumen primario")
+
+    with (
+        patch("ingestion.services.SUMMARY_WAIT_BUDGET_SECONDS", 12),
+        patch("ingestion.services.genai.Client", return_value=client) as gemini_client,
+    ):
+        assert generate_run_summary(run) == "Resumen primario"
+
+    timeout_ms = gemini_client.call_args.kwargs["http_options"]["timeout"]
+    assert timeout_ms >= 10_000
+
+
+@pytest.mark.django_db
+@override_settings(
+    GEMINI_API_KEY="gemini-key",
+    GEMINI_MODEL="gemini-primary",
+    GEMINI_FALLBACK_MODEL="",
+    GROQ_API_KEY="",
+    GROQ_MODEL="",
+)
+def test_gemini_is_skipped_when_budget_has_less_than_ten_seconds(run):
+    clock = MagicMock()
+    clock.monotonic.side_effect = [0, 25, 25]
+
+    with (
+        patch("ingestion.services.SUMMARY_WAIT_BUDGET_SECONDS", 30),
+        patch("ingestion.services._call_gemini", return_value="No debe usarse") as gemini,
+        patch("ingestion.services.time.monotonic", side_effect=clock.monotonic),
+    ):
+        summary = generate_run_summary(run)
+
+    assert summary.startswith("[Resumen automático sin LLM]")
+    gemini.assert_not_called()
+
+
+@override_settings(
+    GROQ_API_KEY="secret-groq-key",
+    GROQ_BASE_URL="https://api.groq.com/openai/v1",
+)
+def test_groq_http_error_logs_status_and_first_300_body_characters(caplog):
+    body = "a" * 300 + "TAIL-SHOULD-NOT-BE-LOGGED"
+
+    with (
+        patch(
+            "ingestion.services.httpx.post",
+            return_value=groq_error_response(429, body),
+        ),
+        caplog.at_level("ERROR", logger="ingestion.services"),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        summary_services._call_groq("prompt", "openai/gpt-oss-120b", 15)
+
+    log_output = caplog.text
+    assert "429" in log_output
+    assert body[:300] in log_output
+    assert "TAIL-SHOULD-NOT-BE-LOGGED" not in log_output
+    assert "secret-groq-key" not in log_output
+
+
+@pytest.mark.django_db
+@override_settings(
     GEMINI_API_KEY="",
     GEMINI_MODEL="gemini-primary",
     GEMINI_FALLBACK_MODEL="",
@@ -267,7 +350,7 @@ def test_empty_groq_response_is_transient_and_retried(run):
     GROQ_API_KEY="groq-key",
     GROQ_MODEL="llama-test",
 )
-def test_total_wait_budget_never_exceeds_thirty_seconds(run):
+def test_total_wait_budget_never_exceeds_sixty_seconds(run):
     class FakeClock:
         def __init__(self):
             self.now = 0.0
@@ -284,34 +367,30 @@ def test_total_wait_budget_never_exceeds_thirty_seconds(run):
     error = genai_errors.ServerError(
         503, {"error": {"code": 503, "message": "busy", "status": "UNAVAILABLE"}}
     )
-    client = MagicMock()
+    gemini_timeouts = []
 
-    def consume_gemini_call_budget(**kwargs):
-        clock.now += 6
+    def consume_gemini_call_budget(prompt, model, timeout):
+        gemini_timeouts.append(timeout)
+        clock.now += timeout
         raise error
 
-    def consume_groq_call_budget(*args, timeout, **kwargs):
+    def consume_groq_call_budget(prompt, model, timeout):
         clock.now += timeout
         raise httpx.ReadTimeout("Groq timed out")
 
-    client.models.generate_content.side_effect = consume_gemini_call_budget
-
     with (
-        patch("ingestion.services.genai.Client", return_value=client) as gemini_client,
-        patch("ingestion.services.httpx.post", side_effect=consume_groq_call_budget) as post,
+        patch("ingestion.services._call_gemini", side_effect=consume_gemini_call_budget),
+        patch("ingestion.services._call_groq", side_effect=consume_groq_call_budget) as groq,
         patch("ingestion.services.time.monotonic", side_effect=clock.monotonic),
         patch("ingestion.services.time.sleep", side_effect=clock.sleep),
     ):
         summary = generate_run_summary(run)
 
     assert summary.startswith("[Resumen automático sin LLM]")
-    assert sum(clock.sleeps) <= 30
-    assert clock.now <= 30
-    assert all(
-        call.kwargs["http_options"]["timeout"] <= 6000
-        for call in gemini_client.call_args_list
-    )
-    post.assert_called_once()
+    assert sum(clock.sleeps) <= 60
+    assert clock.now <= 60
+    assert all(10 <= timeout <= 15 for timeout in gemini_timeouts)
+    groq.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -324,7 +403,7 @@ def test_total_wait_budget_never_exceeds_thirty_seconds(run):
 )
 def test_success_arriving_after_deadline_is_rejected(run):
     clock = MagicMock()
-    clock.monotonic.side_effect = [0, 0, 0, 31, 31]
+    clock.monotonic.side_effect = [0, 0, 0, 61, 61]
     client = MagicMock()
     client.models.generate_content.return_value = gemini_response("Resumen tardío")
 

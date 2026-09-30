@@ -44,8 +44,9 @@ RETRY_BACKOFF_SECONDS = (1, 2)
 # backoff, so a degraded provider chain cannot hold an ingestion indefinitely.
 MAX_SUMMARY_ATTEMPTS = 2
 SUMMARY_BACKOFF_SECONDS = 2
-SUMMARY_WAIT_BUDGET_SECONDS = 30
-SUMMARY_CALL_TIMEOUT_SECONDS = 6
+SUMMARY_WAIT_BUDGET_SECONDS = 60
+SUMMARY_CALL_TIMEOUT_SECONDS = 15
+GEMINI_MIN_TIMEOUT_SECONDS = 10
 
 
 class _EmptySummaryError(Exception):
@@ -75,7 +76,12 @@ def _is_transient_summary_error(exc: Exception) -> bool:
 def _call_gemini(prompt: str, model: str, timeout_seconds: float) -> str:
     client = genai.Client(
         api_key=settings.GEMINI_API_KEY,
-        http_options={"timeout": max(1, int(timeout_seconds * 1000))},
+        http_options={
+            "timeout": max(
+                GEMINI_MIN_TIMEOUT_SECONDS * 1000,
+                int(timeout_seconds * 1000),
+            )
+        },
     )
     response = client.models.generate_content(model=model, contents=prompt)
     return (response.text or "").strip()
@@ -91,11 +97,21 @@ def _call_groq(prompt: str, model: str, timeout_seconds: float) -> str:
         json={
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 400,
+            "max_completion_tokens": 1024,
+            "reasoning_effort": "low",
+            "include_reasoning": False,
         },
         timeout=timeout_seconds,
     )
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError:
+        logger.error(
+            "Groq HTTP %s: %s",
+            response.status_code,
+            response.text[:300],
+        )
+        raise
     try:
         return (response.json()["choices"][0]["message"]["content"] or "").strip()
     except (KeyError, IndexError, TypeError):
@@ -114,10 +130,16 @@ def _call_before_deadline(call_provider, remaining: float):
         executor.shutdown(wait=False, cancel_futures=True)
 
 
-def _try_summary_provider(run, source: str, call_provider, deadline: float):
+def _try_summary_provider(
+    run,
+    source: str,
+    call_provider,
+    deadline: float,
+    minimum_timeout_seconds: float = 0,
+):
     for attempt in range(1, MAX_SUMMARY_ATTEMPTS + 1):
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if remaining < minimum_timeout_seconds or remaining <= 0:
             return None
         try:
             call_timeout = min(remaining, SUMMARY_CALL_TIMEOUT_SECONDS)
@@ -383,7 +405,7 @@ def generate_run_summary(run: IngestionRun) -> str:
     """
     Evalúa proveedores configurados en orden y persiste texto + procedencia.
     Cada proveedor tiene hasta dos intentos para errores transitorios, todos
-    compartiendo un presupuesto monotónico máximo de 30 segundos.
+    compartiendo un presupuesto monotónico máximo de 60 segundos.
     """
     report = run.quality_report()
     prompt = _build_summary_prompt(run, report)
@@ -395,6 +417,7 @@ def generate_run_summary(run: IngestionRun) -> str:
             (
                 f"gemini:{settings.GEMINI_MODEL}",
                 lambda timeout: _call_gemini(prompt, settings.GEMINI_MODEL, timeout),
+                GEMINI_MIN_TIMEOUT_SECONDS,
             )
         )
         if settings.GEMINI_FALLBACK_MODEL:
@@ -404,6 +427,7 @@ def generate_run_summary(run: IngestionRun) -> str:
                     lambda timeout: _call_gemini(
                         prompt, settings.GEMINI_FALLBACK_MODEL, timeout
                     ),
+                    GEMINI_MIN_TIMEOUT_SECONDS,
                 )
             )
     if settings.GROQ_API_KEY and settings.GROQ_MODEL:
@@ -411,13 +435,20 @@ def generate_run_summary(run: IngestionRun) -> str:
             (
                 f"groq:{settings.GROQ_MODEL}",
                 lambda timeout: _call_groq(prompt, settings.GROQ_MODEL, timeout),
+                0,
             )
         )
 
-    for source, provider in providers:
+    for source, provider, minimum_timeout_seconds in providers:
         if deadline - time.monotonic() <= 0:
             break
-        summary = _try_summary_provider(run, source, provider, deadline)
+        summary = _try_summary_provider(
+            run,
+            source,
+            provider,
+            deadline,
+            minimum_timeout_seconds,
+        )
         if summary:
             return _save_summary(run, summary, source)
 
