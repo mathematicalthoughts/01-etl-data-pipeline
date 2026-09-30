@@ -29,6 +29,7 @@ Pipeline Django que ingiere precios diarios OHLCV del futuro del cobre (HG=F) y 
 8. Sin secretos en código, logs ni commits. Config solo por variables de entorno (`python-decouple`).
 9. Sin dependencias nuevas salvo que el prompt lo pida explícitamente.
 10. No correr comandos que escriban en producción (`backfill_*`, `run_ingestions_now` con el `.env` real) salvo instrucción explícita de J.
+11. Prohibido ejecutar migrate, shell o scripts contra hosts neon.tech sin autorización explícita de J.
 
 ## Comandos útiles
 - `python manage.py run_ingestions_now`: ingesta síncrona de todas las fuentes activas.
