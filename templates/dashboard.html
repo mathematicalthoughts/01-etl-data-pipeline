@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Dashboard · ETL Pipeline{% endblock %}
+{% block title %}Dashboard · Copper Market Data Pipeline{% endblock %}
 
 {% block content %}
 <div class="header">
@@ -35,6 +35,13 @@
     <div class="kpi-label">Filas ingeridas (30d)</div>
     <div class="kpi-value">{{ rows_30d }}</div>
     <div class="kpi-caption">registros OHLCV</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Resumenes IA (30D)</div>
+    <div class="kpi-value{% if ai_summary_rate_30d != None %} ok{% endif %}">
+      {% if ai_summary_rate_30d != None %}{{ ai_summary_rate_30d }}%{% else %}—{% endif %}
+    </div>
+    <div class="kpi-caption">corridas resumidas por un LLM</div>
   </div>
 </div>
 
@@ -87,7 +94,7 @@
       </div>
       {% if latest_summary_run %}
       <div class="ai-block">
-        <div class="ai-label">Gemini · resumen del último run</div>
+        <div class="ai-label">{{ latest_summary_label }}</div>
         <div class="ai-text">&ldquo;{{ latest_summary_run.summary }}&rdquo;</div>
       </div>
       {% endif %}

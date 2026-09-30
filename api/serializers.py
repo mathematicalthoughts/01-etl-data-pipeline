@@ -33,6 +33,7 @@ class IngestionRunSerializer(serializers.ModelSerializer):
             "rows_updated",
             "errors_json",
             "summary",
+            "summary_source",
             "started_at",
             "finished_at",
             "created_at",
@@ -70,6 +71,7 @@ class QualityReportSerializer(serializers.Serializer):
     tickers_ingested = serializers.ListField(child=serializers.CharField())
     tickers_failed = serializers.ListField(child=serializers.CharField())
     success_rate = serializers.FloatField()
+    summary_source = serializers.CharField(allow_blank=True)
 
 
 class TriggerSourceSerializer(serializers.Serializer):

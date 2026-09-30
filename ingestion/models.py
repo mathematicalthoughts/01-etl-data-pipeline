@@ -41,6 +41,7 @@ class IngestionRun(models.Model):
     ticker_stats = models.JSONField(default=dict, blank=True)
     errors_json = models.JSONField(default=list, blank=True)
     summary = models.TextField(blank=True, default="")
+    summary_source = models.CharField(max_length=64, blank=True, default="")
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -87,6 +88,7 @@ class IngestionRun(models.Model):
                 "tickers_ingested": tickers_ingested,
                 "tickers_failed": tickers_failed,
                 "success_rate": success_rate,
+                "summary_source": self.summary_source,
             }
 
         # Legacy: derive from price_records (accurate only for the last run per source)
@@ -113,6 +115,7 @@ class IngestionRun(models.Model):
             "tickers_ingested": tickers_ingested,
             "tickers_failed": tickers_failed,
             "success_rate": success_rate,
+            "summary_source": self.summary_source,
             "legacy": True,
         }
 

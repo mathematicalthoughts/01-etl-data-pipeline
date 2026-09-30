@@ -118,10 +118,19 @@ DATABASES = {
 
 # Gemini API (resumen en lenguaje natural de cada IngestionRun)
 
-GEMINI_API_KEY = config("GEMINI_API_KEY", default="")
+GEMINI_API_KEY = config("GEMINI_API_KEY", default="").strip()
 # gemini-2.0-flash se retiró el 2026-06-01; gemini-3.8-flash es el modelo
 # estable más reciente sin fecha de retiro anunciada (2026-09-02).
-GEMINI_MODEL = config("GEMINI_MODEL", default="gemini-3.8-flash")
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_MODEL = config("GEMINI_MODEL", default=DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+GEMINI_FALLBACK_MODEL = config("GEMINI_FALLBACK_MODEL", default="").strip()
+
+# Groq expone una API compatible con OpenAI; se consume con httpx para no
+# incorporar otro SDK. Una key vacía desactiva completamente este proveedor.
+GROQ_API_KEY = config("GROQ_API_KEY", default="").strip()
+GROQ_MODEL = config("GROQ_MODEL", default="").strip()
+DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_BASE_URL = config("GROQ_BASE_URL", default=DEFAULT_GROQ_BASE_URL).strip() or DEFAULT_GROQ_BASE_URL
 
 
 # Celery
@@ -188,7 +197,11 @@ STATICFILES_DIRS = [BASE_DIR / "static"]
 
 STORAGES = {
     "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        "BACKEND": (
+            "django.contrib.staticfiles.storage.StaticFilesStorage"
+            if TESTING
+            else "whitenoise.storage.CompressedManifestStaticFilesStorage"
+        ),
     },
 }
 
