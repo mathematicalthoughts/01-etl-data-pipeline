@@ -82,3 +82,13 @@ def test_no_render_external_hostname_leaves_allowed_hosts_unaffected(monkeypatch
     finally:
         monkeypatch.undo()
         importlib.reload(settings_module)
+
+
+def test_empty_gemini_model_uses_default(monkeypatch):
+    monkeypatch.setenv("GEMINI_MODEL", "")
+    try:
+        importlib.reload(settings_module)
+        assert settings_module.GEMINI_MODEL == "gemini-3.8-flash"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(settings_module)

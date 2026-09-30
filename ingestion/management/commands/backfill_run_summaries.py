@@ -21,7 +21,8 @@ class Command(BaseCommand):
         count = 0
         for run in runs_to_update:
             run.summary = _build_fallback_summary(run)
-            run.save(update_fields=["summary"])
+            run.summary_source = "fallback"
+            run.save(update_fields=["summary", "summary_source"])
             count += 1
 
         self.stdout.write(

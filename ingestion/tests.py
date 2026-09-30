@@ -383,7 +383,7 @@ def test_run_ingestion_survives_gemini_failure_and_logs_it(stock_source, caplog)
     assert run.status == IngestionRun.Status.SUCCESS
     assert run.rows_ingested == 1
     assert run.summary.startswith("[Resumen automático sin LLM]")
-    assert "resumen de Gemini" in caplog.text
+    assert "resumen gemini:" in caplog.text
     assert str(run.id) in caplog.text
 
 
@@ -531,7 +531,7 @@ def test_reap_stale_running_runs_leaves_recent_running_run_untouched(stock_sourc
 @pytest.mark.django_db
 def test_generate_run_summary_retries_transient_503_then_succeeds(stock_source):
     """
-    (a) Gemini falla 2 veces con ServerError(503) luego tiene éxito en el 3er
+    (a) Gemini falla una vez con ServerError(503) y tiene éxito en el 2do
     intento: el summary final debe ser el texto del LLM, no el fallback.
     """
     run = IngestionRun.objects.create(
@@ -548,9 +548,9 @@ def test_generate_run_summary_retries_transient_503_then_succeeds(stock_source):
     fake_client_success = MagicMock()
     fake_client_success.models.generate_content.return_value = fake_response
 
-    # genai.Client is called once per attempt; first 2 raise, 3rd returns good client
+    # genai.Client is called once per attempt; first raises, second succeeds.
     with (
-        patch(GEMINI_PATCH_TARGET, side_effect=[server_error, server_error, fake_client_success]),
+        patch(GEMINI_PATCH_TARGET, side_effect=[server_error, fake_client_success]),
         patch("ingestion.services.time.sleep") as mocked_sleep,
     ):
         summary = generate_run_summary(run)
@@ -559,8 +559,7 @@ def test_generate_run_summary_retries_transient_503_then_succeeds(stock_source):
     assert not summary.startswith("[Resumen automático sin LLM]")
     run.refresh_from_db()
     assert run.summary == "Resumen exitoso tras reintentos."
-    # 2 sleeps between attempts 1->2 and 2->3
-    assert mocked_sleep.call_count == 2
+    assert mocked_sleep.call_count == 1
 
 
 @pytest.mark.django_db
@@ -588,8 +587,7 @@ def test_generate_run_summary_falls_back_after_all_503_retries_exhausted(stock_s
     assert summary.startswith("[Resumen automático sin LLM]")
     run.refresh_from_db()
     assert run.summary.startswith("[Resumen automático sin LLM]")
-    # 2 sleeps between the 3 attempts
-    assert mocked_sleep.call_count == 2
+    assert mocked_sleep.call_count == 1
 
 
 @pytest.mark.django_db
@@ -669,7 +667,7 @@ def test_backfill_run_summaries_updates_empty_summaries_and_is_idempotent(stock_
 @pytest.mark.django_db
 def test_generate_run_summary_retries_transient_429_then_succeeds(stock_source):
     """
-    429 ClientError (rate limit) es transitorio: 2 fallos seguidos de éxito
+    429 ClientError (rate limit) es transitorio: un fallo seguido de éxito
     → el summary final debe ser el texto del LLM, no el fallback.
     """
     run = IngestionRun.objects.create(
@@ -688,7 +686,7 @@ def test_generate_run_summary_retries_transient_429_then_succeeds(stock_source):
     fake_client_success.models.generate_content.return_value = fake_response
 
     with (
-        patch(GEMINI_PATCH_TARGET, side_effect=[rate_limit_error, rate_limit_error, fake_client_success]),
+        patch(GEMINI_PATCH_TARGET, side_effect=[rate_limit_error, fake_client_success]),
         patch("ingestion.services.time.sleep") as mocked_sleep,
     ):
         summary = generate_run_summary(run)
@@ -697,7 +695,7 @@ def test_generate_run_summary_retries_transient_429_then_succeeds(stock_source):
     assert not summary.startswith("[Resumen automático sin LLM]")
     run.refresh_from_db()
     assert run.summary == "Resumen exitoso tras rate limit."
-    assert mocked_sleep.call_count == 2
+    assert mocked_sleep.call_count == 1
 
 
 # --- rows_created / rows_updated tracking -----------------------------------

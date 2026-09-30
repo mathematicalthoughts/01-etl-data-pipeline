@@ -1,5 +1,6 @@
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import timedelta
 
 import httpx
@@ -39,20 +40,130 @@ TRANSIENT_NETWORK_ERRORS = (
 MAX_HISTORY_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = (1, 2)
 
-# Gemini summary retry constants
-MAX_SUMMARY_ATTEMPTS = 3
-SUMMARY_BACKOFF_SECONDS = (2, 4)
+# Summary provider retry constants. The deadline covers provider calls and
+# backoff, so a degraded provider chain cannot hold an ingestion indefinitely.
+MAX_SUMMARY_ATTEMPTS = 2
+SUMMARY_BACKOFF_SECONDS = 2
+SUMMARY_WAIT_BUDGET_SECONDS = 20
 
 
-def _is_transient_gemini_error(exc: Exception) -> bool:
-    """Returns True for Gemini errors worth retrying (5xx, 429, or transport failures)."""
+class _EmptySummaryError(Exception):
+    """A provider returned no usable summary text."""
+
+
+class _ProviderDeadlineError(Exception):
+    """A provider did not finish inside the shared summary deadline."""
+
+
+def _is_transient_summary_error(exc: Exception) -> bool:
+    """Return whether a provider failure is safe and useful to retry."""
+    if isinstance(exc, _EmptySummaryError):
+        return True
     if isinstance(exc, genai_errors.ServerError):  # any 5xx
         return True
     if isinstance(exc, genai_errors.APIError) and exc.code == 429:  # rate limit
         return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        return status_code == 429 or status_code >= 500
     if isinstance(exc, httpx.TransportError):  # covers TimeoutException, ConnectError, etc.
         return True
     return False
+
+
+def _call_gemini(prompt: str, model: str, timeout_seconds: float) -> str:
+    client = genai.Client(
+        api_key=settings.GEMINI_API_KEY,
+        http_options={"timeout": max(1, int(timeout_seconds * 1000))},
+    )
+    response = client.models.generate_content(model=model, contents=prompt)
+    return (response.text or "").strip()
+
+
+def _call_groq(prompt: str, model: str, timeout_seconds: float) -> str:
+    response = httpx.post(
+        f"{settings.GROQ_BASE_URL.rstrip('/')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    try:
+        return (response.json()["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _call_before_deadline(call_provider, remaining: float):
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="run-summary")
+    future = executor.submit(call_provider, remaining)
+    try:
+        return future.result(timeout=remaining)
+    except FutureTimeoutError as exc:
+        future.cancel()
+        raise _ProviderDeadlineError("presupuesto de espera agotado") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _try_summary_provider(run, source: str, call_provider, deadline: float):
+    for attempt in range(1, MAX_SUMMARY_ATTEMPTS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            summary = _call_before_deadline(call_provider, remaining)
+            if deadline - time.monotonic() <= 0:
+                raise _ProviderDeadlineError("respuesta recibida fuera del presupuesto")
+            if not summary:
+                raise _EmptySummaryError("respuesta vacía")
+            return summary
+        except Exception as exc:
+            if not _is_transient_summary_error(exc):
+                logger.error(
+                    "resumen %s: error no transitorio para IngestionRun #%s: %s",
+                    source,
+                    run.id,
+                    exc,
+                )
+                return None
+            if attempt == MAX_SUMMARY_ATTEMPTS:
+                logger.error(
+                    "resumen %s: reintentos agotados para IngestionRun #%s: %s",
+                    source,
+                    run.id,
+                    exc,
+                )
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            delay = min(SUMMARY_BACKOFF_SECONDS, remaining)
+            logger.warning(
+                "resumen %s: error transitorio para IngestionRun #%s "
+                "(intento %d/%d): %s — reintentando en %.1fs.",
+                source,
+                run.id,
+                attempt,
+                MAX_SUMMARY_ATTEMPTS,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+    return None
+
+
+def _save_summary(run: IngestionRun, summary: str, source: str) -> str:
+    run.summary = summary
+    run.summary_source = source
+    run.save(update_fields=["summary", "summary_source"])
+    return summary
 
 
 def _build_fallback_summary(run: IngestionRun) -> str:
@@ -267,74 +378,44 @@ def _build_summary_prompt(run: IngestionRun, report: dict) -> str:
 
 def generate_run_summary(run: IngestionRun) -> str:
     """
-    Genera (vía Gemini) y persiste en `run.summary` un resumen en lenguaje
-    natural de 2-3 líneas de un IngestionRun: tickers ingeridos, tickers
-    fallidos y por qué, y la tasa de éxito de `run.quality_report()`.
-
-    Si Gemini falla con un error transitorio (5xx, 429, TimeoutError,
-    ConnectionError), reintenta hasta MAX_SUMMARY_ATTEMPTS veces con backoff
-    SUMMARY_BACKOFF_SECONDS. Para errores no transitorios (ej. 400) no
-    desperdicia reintentos y genera directamente el fallback.
-
-    Nunca re-raise: si todos los reintentos se agotan o el error no es
-    transitorio, persiste un resumen de fallback con prefijo
-    '[Resumen automático sin LLM]'.
+    Evalúa proveedores configurados en orden y persiste texto + procedencia.
+    Cada proveedor tiene hasta dos intentos para errores transitorios, todos
+    compartiendo un presupuesto monotónico máximo de 20 segundos.
     """
     report = run.quality_report()
     prompt = _build_summary_prompt(run, report)
 
-    for attempt in range(1, MAX_SUMMARY_ATTEMPTS + 1):
-        try:
-            client = genai.Client(api_key=settings.GEMINI_API_KEY)
-            response = client.models.generate_content(
-                model=settings.GEMINI_MODEL,
-                contents=prompt,
+    deadline = time.monotonic() + SUMMARY_WAIT_BUDGET_SECONDS
+    providers = []
+    if settings.GEMINI_API_KEY:
+        providers.append(
+            (
+                f"gemini:{settings.GEMINI_MODEL}",
+                lambda timeout: _call_gemini(prompt, settings.GEMINI_MODEL, timeout),
             )
-            summary = (response.text or "").strip()
-            if not summary:
-                # Empty response (blocked or no candidates): treat as transient and retry
-                if attempt < MAX_SUMMARY_ATTEMPTS:
-                    logger.warning(
-                        "resumen de Gemini: respuesta vacía para IngestionRun #%s (intento %d/%d) — reintentando.",
-                        run.id, attempt, MAX_SUMMARY_ATTEMPTS,
-                    )
-                    time.sleep(SUMMARY_BACKOFF_SECONDS[attempt - 1])
-                else:
-                    logger.error(
-                        "resumen de Gemini: respuesta vacía persistente para IngestionRun #%s — usando fallback.",
-                        run.id,
-                    )
-                continue
-            run.summary = summary
-            run.save(update_fields=["summary"])
-            return summary
-        except Exception as exc:
-            if not _is_transient_gemini_error(exc):
-                # Non-transient error: no point retrying, go straight to fallback
-                logger.error(
-                    "resumen de Gemini: error no transitorio para IngestionRun #%s: %s",
-                    run.id,
-                    exc,
+        )
+        if settings.GEMINI_FALLBACK_MODEL:
+            providers.append(
+                (
+                    f"gemini:{settings.GEMINI_FALLBACK_MODEL}",
+                    lambda timeout: _call_gemini(
+                        prompt, settings.GEMINI_FALLBACK_MODEL, timeout
+                    ),
                 )
-                break
-            if attempt < MAX_SUMMARY_ATTEMPTS:
-                logger.warning(
-                    "resumen de Gemini: error transitorio para IngestionRun #%s (intento %d/%d): %s — reintentando.",
-                    run.id,
-                    attempt,
-                    MAX_SUMMARY_ATTEMPTS,
-                    exc,
-                )
-                time.sleep(SUMMARY_BACKOFF_SECONDS[attempt - 1])
-            else:
-                logger.error(
-                    "resumen de Gemini: reintentos agotados para IngestionRun #%s: %s",
-                    run.id,
-                    exc,
-                )
+            )
+    if settings.GROQ_API_KEY and settings.GROQ_MODEL:
+        providers.append(
+            (
+                f"groq:{settings.GROQ_MODEL}",
+                lambda timeout: _call_groq(prompt, settings.GROQ_MODEL, timeout),
+            )
+        )
 
-    # All retries exhausted or non-transient error: persist deterministic fallback
-    fallback = _build_fallback_summary(run)
-    run.summary = fallback
-    run.save(update_fields=["summary"])
-    return fallback
+    for source, provider in providers:
+        if deadline - time.monotonic() <= 0:
+            break
+        summary = _try_summary_provider(run, source, provider, deadline)
+        if summary:
+            return _save_summary(run, summary, source)
+
+    return _save_summary(run, _build_fallback_summary(run), "fallback")

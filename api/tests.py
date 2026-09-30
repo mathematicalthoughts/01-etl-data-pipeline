@@ -77,11 +77,16 @@ def test_list_runs_returns_all_runs_ordered_by_most_recent(api_client, stock_sou
 
 @pytest.mark.django_db
 def test_list_runs_includes_source_name(api_client, stock_source):
-    IngestionRun.objects.create(source=stock_source, status=IngestionRun.Status.SUCCESS)
+    IngestionRun.objects.create(
+        source=stock_source,
+        status=IngestionRun.Status.SUCCESS,
+        summary_source="gemini:gemini-primary",
+    )
 
     response = api_client.get("/api/runs/")
 
     assert response.data[0]["source_name"] == stock_source.name
+    assert response.data[0]["summary_source"] == "gemini:gemini-primary"
 
 
 # --- GET /api/runs/{id}/quality-report/ ---------------------------------
@@ -128,6 +133,7 @@ def test_quality_report_returns_rows_errors_and_completeness(api_client, stock_s
     assert data["tickers_ingested"] == ["AAPL"]
     assert data["tickers_failed"] == ["BADTICKER"]
     assert data["success_rate"] == 50.0
+    assert data["summary_source"] == ""
 
 
 @pytest.mark.django_db
