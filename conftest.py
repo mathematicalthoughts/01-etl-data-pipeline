@@ -1,6 +1,26 @@
+import os
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import MagicMock, patch
 
 import pytest
+from decouple import config
+
+
+def _guard_remote_test_database(database_url, allow_remote):
+    """Abort before Django can connect pytest to the production Neon database."""
+    parsed = urlparse(database_url)
+    hosts = [parsed.hostname or "", *parse_qs(parsed.query).get("host", [])]
+    if any("neon.tech" in host.lower() for host in hosts) and allow_remote != "1":
+        raise pytest.UsageError(
+            "Refusing to run tests against a neon.tech database. Use the local "
+            "Docker database or set ALLOW_REMOTE_TEST_DB=1 explicitly."
+        )
+
+
+_guard_remote_test_database(
+    config("DATABASE_URL", default=""),
+    os.environ.get("ALLOW_REMOTE_TEST_DB", ""),
+)
 
 
 @pytest.fixture(autouse=True)

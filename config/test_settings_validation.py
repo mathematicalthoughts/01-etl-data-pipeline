@@ -92,3 +92,46 @@ def test_empty_gemini_model_uses_default(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(settings_module)
+
+
+def test_pytest_uses_plain_staticfiles_storage():
+    assert settings_module.TESTING is True
+    assert settings_module.STORAGES["staticfiles"]["BACKEND"] == (
+        "django.contrib.staticfiles.storage.StaticFilesStorage"
+    )
+
+
+def test_remote_test_database_guard_rejects_neon_without_opt_in():
+    from conftest import _guard_remote_test_database
+
+    with pytest.raises(pytest.UsageError, match="ALLOW_REMOTE_TEST_DB=1"):
+        _guard_remote_test_database(
+            "postgresql://user:password@ep-example.neon.tech/database",
+            allow_remote="",
+        )
+
+
+@pytest.mark.parametrize(
+    ("database_url", "allow_remote"),
+    [
+        ("postgresql://postgres:postgres@localhost:5433/etl_test", ""),
+        ("postgresql://user:password@ep-example.neon.tech/database", "1"),
+        ("postgresql:///database?host=ep-example.neon.tech", "1"),
+    ],
+)
+def test_remote_test_database_guard_allows_local_or_explicit_opt_in(
+    database_url, allow_remote
+):
+    from conftest import _guard_remote_test_database
+
+    _guard_remote_test_database(database_url, allow_remote)
+
+
+def test_remote_test_database_guard_rejects_neon_query_host_without_opt_in():
+    from conftest import _guard_remote_test_database
+
+    with pytest.raises(pytest.UsageError, match="ALLOW_REMOTE_TEST_DB=1"):
+        _guard_remote_test_database(
+            "postgresql:///database?host=ep-example.neon.tech",
+            allow_remote="",
+        )

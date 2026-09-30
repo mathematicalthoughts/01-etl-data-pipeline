@@ -197,7 +197,11 @@ STATICFILES_DIRS = [BASE_DIR / "static"]
 
 STORAGES = {
     "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        "BACKEND": (
+            "django.contrib.staticfiles.storage.StaticFilesStorage"
+            if TESTING
+            else "whitenoise.storage.CompressedManifestStaticFilesStorage"
+        ),
     },
 }
 

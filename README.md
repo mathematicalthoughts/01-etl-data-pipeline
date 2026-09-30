@@ -65,9 +65,17 @@ python manage.py runserver
 
 ## Tests
 
+Levanta un PostgreSQL local dedicado en el puerto 5433 y ejecuta pytest con
+esa URL explícita:
+
 ```bash
-pytest --cov
+docker compose up -d db
+DATABASE_URL=postgresql://postgres:postgres@localhost:5433/etl_test DATABASE_SSL_REQUIRE=False pytest --cov --cov-report=term-missing
 ```
+
+**Nunca ejecutes los tests con el `DATABASE_URL` de producción.** La suite se
+aborta si detecta un host `neon.tech`; `ALLOW_REMOTE_TEST_DB=1` existe solo
+como opt-in explícito para casos excepcionales.
 
 CI en GitHub Actions contra un Postgres real en cada push y pull request.
 
